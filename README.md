@@ -30,22 +30,6 @@ against its stated intent and signs; the server broadcasts. Package READMEs:
 boundary) and `packages/client-sdk/README.md` (quickstart, the verify-before-sign
 contract); `packages/e2e/README.md` covers the regtest journey suite.
 
-### Native mobile: rgb-sdk-kotlin-light
-
-Natively written Android apps fill the same client role from a **separate repository**,
-`rgb-sdk-kotlin-light` (`com.utexo.rgb.sdk`), which ships its own Rust signing core and
-speaks the REST surface above:
-
-```
-Android app (Kotlin)
-  └─ rgb-sdk-kotlin-light   (Keystore seed custody, operation journal, local PSBT
-        │                    verify + sign via its own `utexo-local-signer` core)
-        │  HTTPS / OkHttp
-     API gateway  (same REST surface as above)
-```
-
-Two consequences for work in this repository:
-
 - **The gateway's HTTP surface is a published contract with an out-of-repo consumer.**
   Response schemas are strict (`additionalProperties: false`), so removing a field,
   retyping one, or narrowing an accepted range is breaking; adding a field is not. That
@@ -155,27 +139,3 @@ curl http://localhost:3101/nodeinfo
 only the gateway talks to it (design doc invariant I4); never expose RLN publicly.
 
 Fund/mine helpers: `./regtest.sh sendtoaddress <addr> <amount>`, `./regtest.sh mine <blocks>`.
-
-## rgb-lib binding status (verified 2026-09-09, Preflight A)
-
-`@utexo/rgb-lib@0.3.0-beta.18` supports **watch-only** (mnemonic-less) wallets, but its
-published JS `wrapper.js` is stale: the compiled native module takes
-`rgblib_new_wallet(walletData, keys)` (2 args) while the wrapper passes 1, and several
-signatures differ (`send_begin` takes 8 args incl. `expiration_timestamp_opt`,
-`blind_receive`/`witness_receive` take an expiration timestamp instead of a duration).
-The gateway therefore calls the native module
-(`@utexo/rgb-lib-linux-x64/rgblib`) directly through its own thin shim. Verified on
-regtest end-to-end with an external signer: watch-only construction
-(`keys.mnemonic: null`), `getAddress`, `listUnspents`, `issueAssetNIA`, `blindReceive`,
-`witnessReceive`, `createUtxosBegin` → external `signPsbt` → `createUtxosEnd`, and
-`sendBegin` → external `signPsbt` → `sendEnd` with the transfer settling on the
-recipient. Marshalling rules for the shim:
-
-- all numbers are passed as strings (`feeRate`, `minConfirmations`, `num`, `size`);
-- JSON payloads are camelCase (`WalletData`, `SinglesigKeys`, `Recipient`);
-- `Assignment` is externally tagged with a JSON number: `{"Fungible": 100}`;
-- JS `null` maps to a NULL pointer ONLY for params compiled with the nullable typemap
-  (`asset_id_opt`, `num`/`size` opts); `expiration_timestamp_opt` is NOT nullable — always
-  pass a concrete unix-timestamp string;
-- `send_begin` returns a JSON-serialized object (take `.psbt`), while
-  `create_utxos_begin` returns the raw PSBT base64 string.
