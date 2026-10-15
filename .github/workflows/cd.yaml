@@ -1,0 +1,73 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+    branches: [main]
+
+env:
+  IMAGE: ghcr.io/utexo-protocol/rln-gateway
+  VERSION: ${{ github.event.workflow_run.head_sha }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minimal-gateway-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: build
+        run: |
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$VERSION"
+          docker build -t "$IMAGE:$VERSION" -f Dockerfile .
+          docker push "$IMAGE:$VERSION"
+          reference=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$VERSION")
+          echo "digest=${reference##*@}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Deploy production
+        uses: appleboy/ssh-action@v1
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
+          command_timeout: 12m
+          envs: DIGEST,PROJECT_PATH
+          script: |
+            set -eu
+            cd "${PROJECT_PATH:?Set PROJECT_PATH secret}"
+            ./deploy.sh "$DIGEST"
