@@ -64,7 +64,6 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          fingerprint: ${{ secrets.DEPLOY_HOST_FINGERPRINT }}
           command_timeout: 12m
           envs: DIGEST,PROJECT_PATH
           script: |
