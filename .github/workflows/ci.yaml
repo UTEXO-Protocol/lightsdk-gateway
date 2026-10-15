@@ -32,7 +32,7 @@ permissions:
 jobs:
   workspace:
     name: Build, lint and test the workspace
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +45,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # package.json engines and the gateway README require 20+.
-          node-version: '20'
+          # Match the supported Node LTS used by the production image.
+          node-version: '22'
           cache: pnpm
 
       # --frozen-lockfile so a dependency change that was not committed to the
