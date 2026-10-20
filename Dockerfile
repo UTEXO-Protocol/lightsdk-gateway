@@ -18,6 +18,10 @@ RUN pnpm --filter @utexo/rln-gateway deploy --prod --legacy /out \
     && cp -a packages/gateway/dist/. /out/dist/
 
 FROM node:22-bookworm-slim AS runtime
+# Native rgb-lib HTTPS clients need the system trust store, not Node's bundled CAs.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -s /etc/ssl/certs/ca-certificates.crt
 LABEL org.opencontainers.image.source="https://github.com/UTEXO-Protocol/rln-gateway"
 ENV NODE_ENV=production
 WORKDIR /app
