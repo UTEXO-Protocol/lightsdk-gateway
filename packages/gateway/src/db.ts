@@ -161,6 +161,20 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE user_xpubs ADD COLUMN address_index_high_water INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 4,
+    // One master fingerprint per user. rgb-node-api keys the wallets it hosts
+    // by fingerprint alone, so two users sharing one would be served from the
+    // same wallet (I3). A database that already holds such a pair fails this
+    // migration loudly rather than keeping the collision.
+    //
+    // The Lightning tables (ledger, pending_deposits, ln_invoices, withdrawals,
+    // worker_state) are no longer written; they are left in place rather than
+    // dropped, so no data is destroyed by an upgrade.
+    sql: `
+      CREATE UNIQUE INDEX user_xpubs_fingerprint ON user_xpubs (fingerprint);
+    `,
+  },
 ];
 
 export function schemaVersion(db: GatewayDb): number {

@@ -1,7 +1,7 @@
 /**
- * Gateway server skeleton: Fastify + SQLite + auth + per-user FIFO queue +
- * idempotency hooks. Later tasks register RLN, wallet, on-chain and LN routes
- * on top of the decorators wired here.
+ * Gateway server: Fastify + SQLite + auth + per-user FIFO queue + idempotency
+ * hooks, with the wallet and on-chain routes registered on top of the
+ * decorators wired here.
  */
 import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -17,18 +17,13 @@ import { QueueFullError, UserQueues } from './queue.js';
 import { HttpError } from './errors.js';
 import { createUserRouteSchema, healthRouteSchema, meRouteSchema } from './schemas/index.js';
 import type { WalletBackend } from './wallets/backend.js';
-import { NativeWalletBackend } from './wallets/rgblib.js';
+import { RgbNodeApiWalletBackend } from './wallets/rgbnodeapi.js';
 import { WalletOpQueues } from './wallets/queue.js';
 import { WalletPool } from './wallets/pool.js';
 import { WalletService } from './wallets/service.js';
 import { OnchainService } from './wallets/prepare.js';
 import { registerWalletRoutes } from './routes/wallet.js';
 import { registerOnchainRoutes } from './routes/onchain.js';
-import { FloatCapExceededError, InsufficientBalanceError, Ledger } from './ledger.js';
-import { RlnClient, type RlnApi } from './rln/client.js';
-import { LnFlows, registerLnRoutes } from './routes/ln.js';
-import { DepositsWorker } from './workers/deposits.js';
-import { Reconciler } from './workers/reconciler.js';
 import { CompletionsWorker } from './workers/completions.js';
 import { FeeEstimator } from './fees.js';
 
@@ -49,11 +44,6 @@ declare module 'fastify' {
     wallets: WalletService;
     walletPool: WalletPool;
     onchain: OnchainService;
-    rln: RlnApi;
-    ledger: Ledger;
-    ln: LnFlows;
-    depositsWorker: DepositsWorker;
-    reconciler: Reconciler;
     completionsWorker: CompletionsWorker;
     fees: FeeEstimator;
   }
@@ -70,13 +60,11 @@ export interface BuildServerOptions {
   /** Capture stream for log output (tests assert secrets never appear). */
   loggerStream?: { write(msg: string): void };
   loggerLevel?: string;
-  /** Wallet backend override (unit tests inject a mock; defaults to rgb-lib). */
+  /** Wallet backend override (unit tests inject a mock; defaults to rgb-node-api). */
   walletBackend?: WalletBackend;
-  /** RLN client override (unit tests inject a fake; defaults to RlnClient). */
-  rlnClient?: RlnApi;
-  /** Esplora fetch override for the deposits watcher and fee estimator. */
+  /** Esplora fetch override for the fee estimator. */
   esploraFetch?: typeof fetch;
-  /** Start the background workers (deposits watcher + reconciler). Off in tests. */
+  /** Start the background completions worker. Off in tests. */
   startWorkers?: boolean;
 }
 
@@ -116,10 +104,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   });
 
   // Correlation handle. Client-facing error bodies carry only `code` and
-  // `message` (invariant I4) — the RLN or wallet failure they were mapped from
-  // is logged under this same id and nowhere else. Without the header a client
-  // holding a 502 COMPLETE_AMBIGUOUS or WITHDRAWAL_UNRESOLVED has nothing an
-  // operator can grep for. Set on the request hook so it is present on error
+  // `message` (invariant I4) — the wallet failure they were mapped from is
+  // logged under this same id and nowhere else. Without the header a client
+  // holding a 502 COMPLETE_AMBIGUOUS has nothing an operator can grep for. Set on the request hook so it is present on error
   // replies and on idempotency replays alike (the replay path re-runs hooks and
   // caches only status/content-type/body, so a replay gets a fresh id).
   app.addHook('onRequest', async (request, reply) => {
@@ -141,10 +128,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
 
   const walletBackend =
     options.walletBackend ??
-    new NativeWalletBackend({
-      baseDir: config.walletsDir,
-      network: config.bitcoinNetwork,
-      indexerUrl: config.walletIndexerUrl,
+    new RgbNodeApiWalletBackend({
+      baseUrl: config.walletServiceUrl,
+      timeoutMs: config.walletServiceTimeoutMs,
     });
   const walletPool = new WalletPool(walletBackend, new WalletOpQueues(), {
     maxOpen: config.walletMaxOpen,
@@ -162,31 +148,6 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     }),
   );
 
-  const rln =
-    options.rlnClient ??
-    new RlnClient({ baseUrl: config.rlnUrl, adminToken: config.rlnAdminToken });
-  app.decorate('rln', rln);
-  const ledger = new Ledger(db);
-  app.decorate('ledger', ledger);
-  app.decorate('ln', new LnFlows(db, ledger, rln, config));
-  const depositsWorker = new DepositsWorker({
-    db,
-    ledger,
-    rln,
-    esploraUrl: config.esploraUrl,
-    minConfirmations: config.depositMinConfirmations,
-    ...(options.esploraFetch !== undefined ? { fetchImpl: options.esploraFetch } : {}),
-    log: app.log,
-  });
-  app.decorate('depositsWorker', depositsWorker);
-  const reconciler = new Reconciler({
-    db,
-    ledger,
-    rln,
-    outboundGraceSeconds: config.reconcilerGraceSeconds,
-    log: app.log,
-  });
-  app.decorate('reconciler', reconciler);
   const completionsWorker = new CompletionsWorker({
     db,
     onchain: onchainService,
@@ -205,9 +166,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     }
     if (error instanceof HttpError) {
       // The client-facing body stays opaque (invariant I4), so the `cause` —
-      // the RLN or wallet failure this was mapped from — is the only record
-      // an operator has of why a money-moving call failed. It must reach the
-      // log, or an 'ambiguous' withdrawal is unresolvable.
+      // the wallet failure this was mapped from — is the only record an
+      // operator has of why a money-moving call failed. It must reach the
+      // log, or an ambiguous completion is unresolvable.
       if (error.statusCode >= 500 || error.cause !== undefined) {
         request.log.error(
           { err: error.cause ?? error, code: error.code, statusCode: error.statusCode },
@@ -217,16 +178,6 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       void reply
         .code(error.statusCode)
         .send({ error: { code: error.code, message: error.message } });
-      return;
-    }
-    if (error instanceof FloatCapExceededError) {
-      void reply.code(409).send({ error: { code: 'FLOAT_CAP_EXCEEDED', message: error.message } });
-      return;
-    }
-    if (error instanceof InsufficientBalanceError) {
-      void reply
-        .code(409)
-        .send({ error: { code: 'INSUFFICIENT_BALANCE', message: error.message } });
       return;
     }
     const maybeValidation = error as { validation?: unknown; message?: unknown };
@@ -265,17 +216,12 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
 
   registerWalletRoutes(app);
   registerOnchainRoutes(app);
-  registerLnRoutes(app);
 
   if (options.startWorkers === true) {
-    depositsWorker.start(config.depositsIntervalMs);
-    reconciler.start(config.reconcilerIntervalMs);
     completionsWorker.start(config.completionsIntervalMs);
   }
 
   app.addHook('onClose', async () => {
-    depositsWorker.stop();
-    reconciler.stop();
     completionsWorker.stop();
     await walletPool.closeAll();
     db.close();

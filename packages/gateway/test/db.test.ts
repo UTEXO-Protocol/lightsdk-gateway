@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { migrate, openDb, schemaVersion } from '../src/db.js';
 
 /** Bump alongside a new MIGRATIONS entry in src/db.ts. */
-const LATEST_SCHEMA_VERSION = 3;
+const LATEST_SCHEMA_VERSION = 4;
 
 describe('db migrations', () => {
   it('upgrades a v1 database in place, backfilling ln_invoices.expires_at', () => {
@@ -13,6 +13,7 @@ describe('db migrations', () => {
     db.exec('ALTER TABLE pending_ops DROP COLUMN signed_psbt');
     db.exec('ALTER TABLE pending_ops DROP COLUMN completion_attempts');
     db.exec('ALTER TABLE user_xpubs DROP COLUMN address_index_high_water');
+    db.exec('DROP INDEX user_xpubs_fingerprint');
     db.pragma('user_version = 1');
     db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, ?)').run(
       'u_1',
@@ -85,6 +86,7 @@ describe('db migrations', () => {
     db.exec('ALTER TABLE pending_ops DROP COLUMN signed_psbt');
     db.exec('ALTER TABLE pending_ops DROP COLUMN completion_attempts');
     db.exec('ALTER TABLE user_xpubs DROP COLUMN address_index_high_water');
+    db.exec('DROP INDEX user_xpubs_fingerprint');
     db.pragma('user_version = 2');
     db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, ?)').run(
       'u_1',
@@ -106,6 +108,48 @@ describe('db migrations', () => {
       .get('op-1') as { signed_psbt: string | null; completion_attempts: number };
     expect(row.signed_psbt).toBeNull();
     expect(row.completion_attempts).toBe(0);
+    db.close();
+  });
+
+  it('upgrades a v3 database in place, making master fingerprints unique', () => {
+    const db = openDb(':memory:');
+    db.exec('DROP INDEX user_xpubs_fingerprint');
+    db.pragma('user_version = 3');
+    const addUser = db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, 1)');
+    addUser.run('u_1', 'hash-1');
+    addUser.run('u_2', 'hash-2');
+    const addXpubs = db.prepare(
+      `INSERT INTO user_xpubs (user_id, vanilla, colored, fingerprint, created_at)
+       VALUES (?, 'van', 'col', ?, 1)`,
+    );
+    addXpubs.run('u_1', 'aabbccdd');
+
+    migrate(db);
+
+    expect(schemaVersion(db)).toBe(LATEST_SCHEMA_VERSION);
+    // rgb-node-api keys wallets by fingerprint, so a second user may not share one.
+    expect(() => addXpubs.run('u_2', 'aabbccdd')).toThrow(/UNIQUE/);
+    expect(() => addXpubs.run('u_2', '11223344')).not.toThrow();
+    db.close();
+  });
+
+  it('refuses to upgrade a database where two users share a fingerprint', () => {
+    const db = openDb(':memory:');
+    db.exec('DROP INDEX user_xpubs_fingerprint');
+    db.pragma('user_version = 3');
+    const addUser = db.prepare('INSERT INTO users (id, token_hash, created_at) VALUES (?, ?, 1)');
+    addUser.run('u_1', 'hash-1');
+    addUser.run('u_2', 'hash-2');
+    const addXpubs = db.prepare(
+      `INSERT INTO user_xpubs (user_id, vanilla, colored, fingerprint, created_at)
+       VALUES (?, 'van', 'col', 'aabbccdd', 1)`,
+    );
+    addXpubs.run('u_1');
+    addXpubs.run('u_2');
+
+    expect(() => migrate(db)).toThrow(/UNIQUE/);
+    // The failed migration rolled back: the database stays at v3.
+    expect(schemaVersion(db)).toBe(3);
     db.close();
   });
 

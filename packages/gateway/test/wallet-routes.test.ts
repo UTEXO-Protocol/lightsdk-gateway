@@ -5,9 +5,9 @@ import { p2tr } from '@scure/btc-signer';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WalletBackendError } from '../src/wallets/backend.js';
 import { createTestUser, testServer, type TestUser } from './helpers.js';
-import { EMPTY_BALANCE, MockWalletBackend } from './wallet-mocks.js';
+import { EMPTY_BALANCE, MockWalletBackend, type MockWalletHandle } from './wallet-mocks.js';
 
-// Real regtest account xpubs (deterministic fixture, Preflight A script).
+// Real regtest account xpubs (deterministic fixture).
 const XPUBS = {
   vanilla:
     'tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX',
@@ -139,8 +139,7 @@ describe('wallet routes', () => {
     });
 
     it('does NOT blame the xpubs for a deployment failure, and logs the cause', async () => {
-      // A missing rgb-lib native module or an unreachable indexer also fails the
-      // smoke-open. Answering 400 INVALID_XPUBS sent an operator hunting for a
+      // An unreachable rgb-node-api or indexer also fails the smoke call. Answering 400 INVALID_XPUBS sent an operator hunting for a
       // client bug — and, because the central handler logs a 400 only when it
       // carries a cause, left the most common bring-up failure with no trace at
       // all. Both halves are asserted here.
@@ -152,7 +151,7 @@ describe('wallet routes', () => {
       const loggedUser = await createTestUser(logged);
       backend.openError = new WalletBackendError(
         'wallet construction failed',
-        'rgb-lib native module unavailable: no platform package for linux-x64',
+        'rgb-node-api /wallet/address unreachable: connect ECONNREFUSED 127.0.0.1:34000',
       );
       const response = await logged.inject({
         method: 'POST',
@@ -163,8 +162,8 @@ describe('wallet routes', () => {
       expect(response.statusCode).toBe(500);
       expect(response.json().error.code).toBe('INTERNAL');
       // Opaque to the client (I4) but present in the log for the operator.
-      expect(response.body).not.toContain('rgb-lib');
-      expect(lines.join('\n')).toContain('no platform package for linux-x64');
+      expect(response.body).not.toContain('rgb-node-api');
+      expect(lines.join('\n')).toContain('ECONNREFUSED');
       backend.openError = undefined;
       await logged.close();
     });
@@ -195,11 +194,12 @@ describe('wallet routes', () => {
       await logged.close();
     });
 
-    it('evicts the smoke-opened wallet when persisting the xpubs fails', async () => {
+    it('releases the claim and evicts the wallet when the smoke call fails', async () => {
       // The pool keys handles by userId alone, so a handle cached for xpubs
-      // that were never persisted would serve addresses derived from the WRONG
+      // that are not registered would serve addresses derived from the WRONG
       // key on a retry with different xpubs — funds sent to an address the
-      // registered wallet never watches.
+      // registered wallet never watches. Closing it also unloads the wallet
+      // from rgb-node-api, which keys loaded wallets by fingerprint.
       const otherXpubs = {
         vanilla:
           'tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ',
@@ -207,20 +207,26 @@ describe('wallet routes', () => {
           'tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX',
         fingerprint: '73c5da0a',
       };
-      // Fail the INSERT specifically (reads still work, so the smoke-open runs).
-      app.db.exec(
-        `CREATE TRIGGER fail_xpubs_insert BEFORE INSERT ON user_xpubs
-         BEGIN SELECT RAISE(ABORT, 'simulated persistence failure'); END`,
-      );
+      // The handle opens (rgb-node-api loads lazily) but its first call fails.
+      const open = backend.open.bind(backend);
+      backend.open = async (identity) => {
+        const handle = (await open(identity)) as MockWalletHandle;
+        handle.failWith = new WalletBackendError(
+          'wallet getAddress failed',
+          'rgb-node-api /wallet/address timed out after 60000ms',
+        );
+        return handle;
+      };
       const failed = await register();
       expect(failed.statusCode).toBe(500);
       expect(app.walletPool.openCount()).toBe(0);
+      expect(app.db.prepare('SELECT 1 FROM user_xpubs').all()).toHaveLength(0);
       await new Promise((resolve) => setImmediate(resolve));
       expect(backend.handleFor(user.userId)?.closed).toBe(true);
 
-      // Restore persistence and register DIFFERENT xpubs: the address must come
-      // from a wallet reopened with those xpubs, not from the cached handle.
-      app.db.exec('DROP TRIGGER fail_xpubs_insert');
+      // Register DIFFERENT xpubs: the address must come from a wallet reopened
+      // with those xpubs, not from the cached handle.
+      backend.open = open;
       const retry = await app.inject({
         method: 'POST',
         url: '/v1/wallet/xpubs',
@@ -231,6 +237,27 @@ describe('wallet routes', () => {
       expect(backend.openCalls).toHaveLength(2);
       expect(backend.openCalls[1]?.xpubs).toEqual(otherXpubs);
     });
+
+    it("refuses another user's master fingerprint before touching the wallet service", async () => {
+      // rgb-node-api serves every request naming a loaded fingerprint from that
+      // one wallet, so the smoke call itself would answer from the first
+      // user's wallet (I3). Same xpubs or different, the second claim fails.
+      expect((await register()).statusCode).toBe(201);
+      const other = await createTestUser(app);
+      for (const payload of [XPUBS, { ...XPUBS, vanilla: XPUBS.colored, colored: XPUBS.vanilla }]) {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/v1/wallet/xpubs',
+          headers: authed(other.token),
+          payload,
+        });
+        expect(response.statusCode).toBe(409);
+        expect(response.json().error.code).toBe('FINGERPRINT_IN_USE');
+      }
+      expect(backend.openCalls.every((call) => call.userId === user.userId)).toBe(true);
+      const owners = app.db.prepare('SELECT user_id FROM user_xpubs').all();
+      expect(owners).toEqual([{ user_id: user.userId }]);
+    });
   });
 
   describe('wallet reads', () => {
@@ -240,6 +267,7 @@ describe('wallet routes', () => {
         '/v1/wallet/balances',
         '/v1/wallet/unspents',
         '/v1/wallet/transfers',
+        '/v1/wallet/transactions',
       ]) {
         const response = await app.inject({ method: 'GET', url, headers: authed() });
         expect(response.statusCode).toBe(404);
@@ -254,6 +282,7 @@ describe('wallet routes', () => {
         ['GET', '/v1/wallet/balances'],
         ['GET', '/v1/wallet/unspents'],
         ['GET', '/v1/wallet/transfers'],
+        ['GET', '/v1/wallet/transactions'],
         ['POST', '/v1/wallet/receive'],
         ['POST', '/v1/wallet/sync'],
       ] as const) {
@@ -414,6 +443,64 @@ describe('wallet routes', () => {
       });
     });
 
+    it('lists on-chain transactions, and filters by txid when asked', async () => {
+      const incoming = {
+        transactionType: 'Incoming',
+        txid: 'aa'.repeat(32),
+        receivedSat: 50_000_000,
+        sentSat: 0,
+        feeSat: 0,
+        confirmationTime: { height: 104, timestamp: 1_700_000_000 },
+      };
+      const pending = {
+        transactionType: 'SendBtc',
+        txid: 'bb'.repeat(32),
+        receivedSat: 48_999_000,
+        sentSat: 50_000_000,
+        feeSat: 1_000,
+        confirmationTime: null,
+      };
+      backend.dataFor = () => ({ transactions: [incoming, pending] });
+      await register();
+
+      const all = await app.inject({
+        method: 'GET',
+        url: '/v1/wallet/transactions',
+        headers: authed(),
+      });
+      expect(all.statusCode).toBe(200);
+      expect(all.json()).toEqual({ transactions: [incoming, pending] });
+
+      const one = await app.inject({
+        method: 'GET',
+        url: `/v1/wallet/transactions?txid=${pending.txid}`,
+        headers: authed(),
+      });
+      expect(one.json()).toEqual({ transactions: [pending] });
+
+      // An unknown txid is an empty list, not an error.
+      const none = await app.inject({
+        method: 'GET',
+        url: `/v1/wallet/transactions?txid=${'cc'.repeat(32)}`,
+        headers: authed(),
+      });
+      expect(none.statusCode).toBe(200);
+      expect(none.json()).toEqual({ transactions: [] });
+    });
+
+    it('rejects a malformed txid filter at the schema layer', async () => {
+      await register();
+      for (const txid of ['abc', 'AA'.repeat(32), 'zz'.repeat(32)]) {
+        const response = await app.inject({
+          method: 'GET',
+          url: `/v1/wallet/transactions?txid=${txid}`,
+          headers: authed(),
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      expect(backend.handleFor(user.userId)?.operations).not.toContain('listTransactions');
+    });
+
     it('aggregates transfers across assets, and filters by assetId when asked', async () => {
       const transfer = (idx: number, assetId: string | null) => ({
         idx,
@@ -445,7 +532,6 @@ describe('wallet routes', () => {
           },
         ],
         transfersByAsset: {
-          null: [transfer(1, null)],
           'rgb:a1': [transfer(2, 'rgb:a1')],
         },
       });
@@ -457,7 +543,12 @@ describe('wallet routes', () => {
         headers: authed(),
       });
       expect(all.statusCode).toBe(200);
-      expect(all.json().transfers.map((t: { idx: number }) => t.idx)).toEqual([1, 2]);
+      expect(all.json().transfers.map((t: { idx: number }) => t.idx)).toEqual([2]);
+      // rgb-node-api lists by asset only: no asset-less listing is requested.
+      const handle = backend.handleFor(user.userId);
+      expect(handle?.operations.filter((op) => op.startsWith('listTransfers:'))).toEqual([
+        'listTransfers:rgb:a1',
+      ]);
 
       const filtered = await app.inject({
         method: 'GET',
@@ -489,9 +580,8 @@ describe('wallet routes', () => {
       expect(row.state).toBe('pending');
     });
 
-    it('passes gateway-controlled transport endpoints and expiration to the wallet', async () => {
+    it('passes the requested duration and confirmation defaults to the wallet', async () => {
       await register();
-      const before = Math.floor(Date.now() / 1000);
       await app.inject({
         method: 'POST',
         url: '/v1/wallet/receive',
@@ -502,12 +592,15 @@ describe('wallet routes', () => {
       expect(handle?.operations).toContain('receive:witness');
       const request = handle?.lastReceiveRequest;
       if (request === undefined) throw new Error('receive request not recorded');
-      // Transport endpoints are gateway-controlled, never client input.
-      expect(request.transportEndpoints).toEqual([app.gatewayConfig.rgbProxyUrl]);
-      expect(request.minConfirmations).toBe(1);
-      // expirationTimestamp = floor(now/1000) + durationSeconds (±5s tolerance).
-      expect(request.expirationTimestamp).toBeGreaterThanOrEqual(before + 600);
-      expect(request.expirationTimestamp).toBeLessThanOrEqual(before + 600 + 5);
+      // rgb-node-api takes a duration and names its own proxy as the
+      // transport endpoint, so neither an expiry timestamp nor endpoints travel.
+      expect(request).toEqual({
+        mode: 'witness',
+        assetId: null,
+        amount: null,
+        durationSeconds: 600,
+        minConfirmations: 1,
+      });
     });
 
     it('rejects a fractional receive amount at the schema layer', async () => {
@@ -555,7 +648,7 @@ describe('wallet routes', () => {
   });
 
   describe('sync and isolation', () => {
-    it('syncs then refreshes the user wallet', async () => {
+    it('syncs and refreshes the user wallet in one refresh call', async () => {
       await register();
       const response = await app.inject({
         method: 'POST',
@@ -564,7 +657,6 @@ describe('wallet routes', () => {
       });
       expect(response.statusCode).toBe(200);
       const handle = backend.handleFor(user.userId);
-      expect(handle?.syncCount).toBe(1);
       expect(handle?.refreshCount).toBe(1);
     });
 

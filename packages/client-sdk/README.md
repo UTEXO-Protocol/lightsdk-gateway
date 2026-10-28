@@ -1,8 +1,8 @@
 # @utexo/lightweight-client-sdk
 
-The lightweight browser/mobile TypeScript SDK for `rln-gateway`. No wasm, no chain sync,
-no LN state — just key management, verify-before-sign PSBT handling, invoice decoding,
-and a typed gateway client. Built on audited primitives (`@scure/bip39`, `@scure/bip32`,
+The lightweight browser/mobile TypeScript SDK for `lightsdk-gateway`. No wasm, no chain sync —
+just key management, verify-before-sign PSBT handling, RGB invoice decoding, and a typed
+gateway client. Built on audited primitives (`@scure/bip39`, `@scure/bip32`,
 `@scure/btc-signer`); the production bundle is gated below 500KB by the test suite.
 
 **The mnemonic is the user's only backup.** All key material is generated and stays on
@@ -14,12 +14,7 @@ unrecoverable. Show it once at generation time and make the user store it.
 ## Quickstart
 
 ```ts
-import {
-  ClientKeys,
-  GatewayClient,
-  generateIdempotencyKey,
-  verifyAndSignPsbt,
-} from '@utexo/lightweight-client-sdk';
+import { ClientKeys, GatewayClient, verifyAndSignPsbt } from '@utexo/lightweight-client-sdk';
 
 // 1. Generate keys client-side. Display `mnemonic` for backup — it never
 //    leaves the device. Restore later with ClientKeys.fromMnemonic(...).
@@ -55,14 +50,6 @@ const { signedPsbt } = verifyAndSignPsbt(keys, prepared.psbt, {
   maxFeeSat: 1_000, // the user-approved fee budget
 });
 const { txid } = await client.completeSendBtc({ opId: prepared.opId, signedPsbt });
-
-// 6. Pay a BOLT11 invoice from the custodial LN float. Money-moving calls
-//    take an idempotency key: replaying the same key + body returns the
-//    cached response for any completed outcome and never double-pays. After a
-//    5xx the response is deliberately not cached, and the gateway reports the
-//    recorded state (409 PAYMENT_ALREADY_ATTEMPTED / WITHDRAWAL_UNRESOLVED)
-//    instead of re-sending — it never auto-retries a send.
-const paid = await client.payLnInvoice({ invoice: 'lnbc…' }, generateIdempotencyKey());
 ```
 
 If a `complete` call is lost — a timeout, a crash, or a 502 `COMPLETE_AMBIGUOUS` — do not
@@ -73,17 +60,15 @@ retry `complete` to finish the bookkeeping rather than sending again.
 
 Asset sends (`prepareSendAsset`/`completeSendAsset`) and colorable-UTXO creation
 (`prepareCreateUtxos`/`completeCreateUtxos`) follow the same prepare → verify-and-sign →
-complete shape. LN float deposits (`prepareLnDeposit`), invoices (`createLnInvoice`,
-`getLnInvoice`), payment listing (`listLnPayments`), balances (`getLnBalance`) and
-withdrawals (`withdrawLn`) round out the surface; `decodeBolt11`/`decodeRgbInvoice`
-decode invoices locally for display before paying.
+complete shape. `decodeRgbInvoice` decodes an RGB invoice locally for display before
+paying it.
 
 ## The verify-before-sign contract
 
 Signing is never blind. `verifyAndSignPsbt` runs `verifyPsbt` internally and refuses to
 sign unless the verdict is clean; `verifyPsbt` can also be called on its own to show the
 user what they are about to authorize. The five checks (from the design doc,
-`docs/design/lightweight-sdk-and-lightweight-rln.md`):
+`docs/design/lightsdk-architecture.md`):
 
 1. **Every input is ours** — each input's script re-derives from the client's own
    descriptors, and the PSBT's key-origin fingerprint/path matches the user's master

@@ -10,6 +10,7 @@ import type {
   WalletBtcBalance,
   WalletHandle,
   WalletIdentity,
+  WalletTransaction,
   WalletTransfer,
   WalletUnspent,
 } from '../src/wallets/backend.js';
@@ -21,8 +22,9 @@ export interface MockWalletData {
   btcBalance?: WalletBtcBalance;
   assets?: WalletAsset[];
   unspents?: WalletUnspent[];
-  /** Keyed by assetId; 'null' key holds asset-less transfers. */
+  /** Keyed by assetId. */
   transfersByAsset?: Record<string, WalletTransfer[]>;
+  transactions?: WalletTransaction[];
   /** Unsigned PSBT returned by every *Begin call. */
   preparedPsbt?: string;
   sendBtcTxid?: string;
@@ -33,7 +35,6 @@ export interface MockWalletData {
 
 export class MockWalletHandle implements WalletHandle {
   readonly operations: string[] = [];
-  syncCount = 0;
   refreshCount = 0;
   receiveCount = 0;
   closed = false;
@@ -74,11 +75,12 @@ export class MockWalletHandle implements WalletHandle {
     return this.op('listUnspents', () => this.data.unspents ?? []);
   }
 
-  listTransfers(assetId: string | null): Promise<WalletTransfer[]> {
-    return this.op(
-      `listTransfers:${assetId ?? 'null'}`,
-      () => this.data.transfersByAsset?.[assetId ?? 'null'] ?? [],
-    );
+  listTransfers(assetId: string): Promise<WalletTransfer[]> {
+    return this.op(`listTransfers:${assetId}`, () => this.data.transfersByAsset?.[assetId] ?? []);
+  }
+
+  listTransactions(): Promise<WalletTransaction[]> {
+    return this.op('listTransactions', () => this.data.transactions ?? []);
   }
 
   lastReceiveRequest: ReceiveRequest | undefined;
@@ -90,7 +92,7 @@ export class MockWalletHandle implements WalletHandle {
       return {
         invoice: `mock-invoice-${this.identity.userId}-${this.receiveCount}`,
         recipientId: `mock-recipient-${this.identity.userId}-${this.receiveCount}`,
-        expirationTimestamp: request.expirationTimestamp,
+        expirationTimestamp: 1_700_000_000 + request.durationSeconds,
         batchTransferIdx: this.receiveCount,
       };
     });
@@ -149,12 +151,6 @@ export class MockWalletHandle implements WalletHandle {
   refresh(): Promise<void> {
     return this.op('refresh', () => {
       this.refreshCount += 1;
-    });
-  }
-
-  sync(): Promise<void> {
-    return this.op('sync', () => {
-      this.syncCount += 1;
     });
   }
 

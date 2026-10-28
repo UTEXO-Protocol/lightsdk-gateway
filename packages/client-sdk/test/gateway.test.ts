@@ -76,20 +76,26 @@ describe('generateIdempotencyKey', () => {
 
 describe('GatewayClient', () => {
   it('percent-encodes caller-supplied path and query values', async () => {
-    // RGB asset ids carry ':' and payment hashes come straight from callers:
+    // RGB asset ids carry ':' and operation ids come straight from callers:
     // an unencoded value could retarget the request to a different route.
     const { seen, fetchFn } = stubFetch([
       jsonResponse(200, { transfers: [] }),
       jsonResponse(200, { transfers: [] }),
       jsonResponse(200, {}),
+      jsonResponse(200, { transactions: [] }),
+      jsonResponse(200, { transactions: [] }),
     ]);
     const client = new GatewayClient({ baseUrl: 'http://gw.local', token: 't', fetchFn });
     await client.getTransfers('rgb:abc-123');
     await client.getTransfers();
-    await client.getLnInvoice('../v1/ln/balance');
+    await client.getOnchainOperation('../../wallet/balances');
+    await client.getTransactions('ab'.repeat(32));
+    await client.getTransactions();
     expect(seen[0]?.url).toBe('http://gw.local/v1/wallet/transfers?assetId=rgb%3Aabc-123');
     expect(seen[1]?.url).toBe('http://gw.local/v1/wallet/transfers');
-    expect(seen[2]?.url).toBe('http://gw.local/v1/ln/invoice/..%2Fv1%2Fln%2Fbalance');
+    expect(seen[2]?.url).toBe('http://gw.local/v1/onchain/operations/..%2F..%2Fwallet%2Fbalances');
+    expect(seen[3]?.url).toBe(`http://gw.local/v1/wallet/transactions?txid=${'ab'.repeat(32)}`);
+    expect(seen[4]?.url).toBe('http://gw.local/v1/wallet/transactions');
   });
 
   it('sends the bearer token and joins paths on a trailing-slash base URL', async () => {
@@ -237,60 +243,6 @@ describe('GatewayClient', () => {
     // The recovery signal after a lost complete.
     expect(status.mayHaveBroadcast).toBe(true);
     expect(status.txid).toBe('d'.repeat(64));
-  });
-
-  it('LN money-moving calls (pay, withdraw) carry an idempotency key; reads do not', async () => {
-    const { seen, fetchFn } = stubFetch([
-      jsonResponse(200, { paymentHash: 'a'.repeat(64), status: 'pending' }),
-      jsonResponse(201, { withdrawalId: 'w', txid: 'b'.repeat(64) }),
-      jsonResponse(200, { btcMsat: 0, assets: {} }),
-      jsonResponse(200, { payments: [] }),
-    ]);
-    const client = new GatewayClient({ baseUrl: 'http://gw.local', token: 't', fetchFn });
-    const key = generateIdempotencyKey();
-    await client.payLnInvoice({ invoice: 'lnbcrt1...' }, key);
-    await client.withdrawLn({ kind: 'btc', address: 'bcrt1q...', amountSat: 1_000 });
-    await client.getLnBalance();
-    await client.listLnPayments();
-    expect(seen[0]?.url).toBe('http://gw.local/v1/ln/pay');
-    expect(seen[0]?.headers['idempotency-key']).toBe(key);
-    expect(seen[1]?.headers['idempotency-key']).toMatch(UUID_V4);
-    expect(seen[2]?.headers['idempotency-key']).toBeUndefined();
-    expect(seen[3]?.headers['idempotency-key']).toBeUndefined();
-  });
-
-  it('LN deposit prepare and invoice endpoints hit the expected routes', async () => {
-    const hash = 'c'.repeat(64);
-    const { seen, fetchFn } = stubFetch([
-      jsonResponse(201, {
-        depositId: 'd',
-        kind: 'btc',
-        address: 'bcrt1q...',
-        invoice: null,
-        recipientId: null,
-      }),
-      jsonResponse(201, { invoice: 'lnbcrt1...', paymentHash: hash }),
-      jsonResponse(200, {
-        paymentHash: hash,
-        invoice: 'lnbcrt1...',
-        state: 'pending',
-        amtMsat: 1000,
-        assetId: null,
-        assetAmount: null,
-        createdAt: 1,
-      }),
-    ]);
-    const client = new GatewayClient({ baseUrl: 'http://gw.local', token: 't', fetchFn });
-    const prepared = await client.prepareLnDeposit({ kind: 'btc', amountMsat: 1_000_000 });
-    expect(prepared.address).toBe('bcrt1q...');
-    await client.createLnInvoice({ amtMsat: 1000 });
-    const info = await client.getLnInvoice(hash);
-    expect(info.state).toBe('pending');
-    expect(seen.map((r) => r.url)).toEqual([
-      'http://gw.local/v1/ln/deposit/prepare',
-      'http://gw.local/v1/ln/invoice',
-      `http://gw.local/v1/ln/invoice/${hash}`,
-    ]);
   });
 });
 

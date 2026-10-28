@@ -41,13 +41,7 @@ export {
   type SignParams,
   type SignResult,
 } from './sign.js';
-export {
-  decodeBolt11,
-  decodeRgbInvoice,
-  InvoiceDecodeError,
-  type Bolt11Invoice,
-  type RgbInvoice,
-} from './invoice.js';
+export { decodeRgbInvoice, InvoiceDecodeError, type RgbInvoice } from './invoice.js';
 export {
   GatewayClient,
   GatewayError,
@@ -60,17 +54,6 @@ export {
   type CreatedUser,
   type FeeEstimate,
   type GatewayClientOptions,
-  type LnBalance,
-  type LnDepositPrepareParams,
-  type LnDepositPrepareResult,
-  type LnInvoiceCreateParams,
-  type LnInvoiceInfo,
-  type LnPayParams,
-  type LnPaymentEntry,
-  type LnPaymentStatus,
-  type LnPayResult,
-  type LnWithdrawParams,
-  type LnWithdrawResult,
   type OperationStatus,
   type PreparedOp,
   type PrepareCreateUtxosParams,
@@ -82,6 +65,7 @@ export {
   type WalletAddress,
   type WalletAsset,
   type WalletBalances,
+  type WalletTransaction,
   type WalletTransfer,
   type WalletUnspent,
 } from './gateway.js';

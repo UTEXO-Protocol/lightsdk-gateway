@@ -1,0 +1,15 @@
+# rgb-node-api config for the regtest stack (see compose.yaml). Hosts reached
+# by service name on the compose network.
+
+[api]
+listen_address = "0.0.0.0"
+port = 34000
+
+[wallet]
+data_dir = "./rgb-data"
+network = "Regtest"
+btc_rpc_address = "bitcoind:18443"
+btc_rpc_user = "dev"
+btc_rpc_password = "dev"
+indexer_address = "tcp://electrs:50001"
+proxy_address = ["rpc://proxy:3000/json-rpc"]

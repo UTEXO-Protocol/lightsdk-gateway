@@ -1,60 +1,59 @@
-# rln-gateway
+# lightsdk-gateway
 
-This is the core `rln-gateway` repository: a pnpm workspace implementing the lightweight
-SDK architecture described in `docs/design/lightweight-sdk-and-lightweight-rln.md`. It
-contains a TypeScript API gateway (`packages/gateway`) in front of one shared RLN
-instance, the lightweight browser/mobile client SDK (`packages/client-sdk`) that keeps all
-key material client-side (verify-before-sign), and a regtest e2e suite (`packages/e2e`).
+This is the core `lightsdk-gateway` repository: a pnpm workspace implementing the lightweight
+SDK architecture described in [`docs/design/lightsdk-architecture.md`](docs/design/lightsdk-architecture.md).
+It contains a TypeScript API gateway (`packages/gateway`) in front of a private
+[rgb-node-api](https://github.com/UTEXO-Protocol/rgb-node-api) service, the lightweight
+browser/mobile client SDK (`packages/client-sdk`) that keeps all key material client-side
+(verify-before-sign), and a regtest e2e suite (`packages/e2e`).
 
-RLN itself lives in the rgb-lightning-node repository. Build, lint and unit tests need
-nothing from it; the regtest suites and RLN type generation use a local checkout (see
-[The rgb-lightning-node checkout](#the-rgb-lightning-node-checkout)).
+rgb-node-api is the only service the gateway depends on. Build, lint and unit tests need
+nothing from it; the regtest suites run it from this repository's own regtest stack (see
+[Regtest stack](#regtest-stack)). The gateway is on-chain only: BTC and RGB assets on user
+UTXOs, with no custodial balance.
 
 ## Architecture
 
-From the design doc:
-
 ```
 browser / mobile app
-  └─ lightweight TS SDK  (keys, PSBT verify + sign, invoice decode)
-        │  HTTPS (REST today; GraphQL/gRPC are gateway-layer options)
-  API gateway  (per-user auth, per-user scoping + FIFO queue, idempotency keys)
-        ├─ per-user watch-only rgb-lib wallets  (PSBT preparation, balances, receives)
-        └─ single RLN instance  (admin token; LN channels, swaps, RGB transfers)
-              └─ shared esplora + RGB proxy
+  └─ client SDK  (keys, PSBT verify + sign, RGB invoice decode)
+        │  HTTPS (REST)
+  lightsdk-gateway  (per-user auth, per-user scoping + FIFO queue, idempotency keys)
+        └─ rgb-node-api  (private; one watch-only rgb-lib wallet per user:
+              │            PSBT preparation, balances, receives, broadcast)
+              └─ shared indexer (electrs / esplora) + RGB proxy
 ```
 
 The server prepares transactions on the user's watch-only wallet; the client verifies
-against its stated intent and signs; the server broadcasts. Package READMEs:
-`packages/gateway/README.md` (config reference, deployment, float caps, the custody
-boundary) and `packages/client-sdk/README.md` (quickstart, the verify-before-sign
-contract); `packages/e2e/README.md` covers the regtest journey suite.
+against its stated intent and signs; the server broadcasts. Neither the gateway nor
+rgb-node-api holds a key. Package READMEs: `packages/gateway/README.md` (config
+reference, deployment, what the gateway needs from rgb-node-api, the custody boundary)
+and `packages/client-sdk/README.md` (quickstart, the verify-before-sign contract);
+`packages/e2e/README.md` covers the regtest journey suite.
 
-- **The gateway's HTTP surface is a published contract with an out-of-repo consumer.**
-  Response schemas are strict (`additionalProperties: false`), so removing a field,
-  retyping one, or narrowing an accepted range is breaking; adding a field is not. That
-  client validates response shapes strictly and refuses anything it cannot map, so a
-  silent default is worse than an explicit error.
+- **The gateway's HTTP surface is a published contract with out-of-repo consumers** — the
+  Kotlin and Swift mobile SDKs. Response schemas are strict (`additionalProperties: false`),
+  so removing a field, retyping one, or narrowing an accepted range is breaking; adding a
+  field is not. Those clients validate response shapes strictly and refuse anything they
+  cannot map, so a silent default is worse than an explicit error.
 - **`packages/client-sdk` is the in-repo reference for that contract.** It is the
   behavioural spec the gateway is tested against and the only client exercised by
-  `packages/e2e`; web and React Native keep using it (185.5 KB of pure JS). It also reads
-  the rgb-lib-authored `packages/client-sdk/test/fixtures/rgblib-parity.json`, which is
-  what keeps this repo's reading of BIP-86 and the RGB coin types honest.
+  `packages/e2e`; web and React Native use it. It also reads the rgb-lib-authored
+  `packages/client-sdk/test/fixtures/rgblib-parity.json`, which is what keeps this repo's
+  reading of BIP-86 and the RGB coin types honest.
 
 ## Deliberately deferred
 
-- **RLN-side Block-3 fixes** (design doc items 4–7) — Rust changes that belong to
-  rgb-lightning-node; they ship there as a separate PR series before scaling user count.
-- **Auto-sweep** of the LN float to user keys — the capped float bounds custodial
-  exposure first; sweeping adds a client-signing round-trip worth designing properly.
-- **Submarine/atomic swaps** for trust-minimized float in/out — weeks of effort on the
-  existing swap API; the capped float is the interim control.
-- **BOLT12 offers** — stay unexposed to avoid the known double-pay on retry
-  (rgb-lightning-node `src/routes.rs:5093-5095`).
+- **Lightning** — the gateway is on-chain only.
+- **Listing pending receives that have no asset yet** — rgb-node-api lists transfers by
+  asset only, so `GET /v1/wallet/transfers` omits them until the sender's transfer
+  arrives.
 - **VSS / encrypted client backup** — the client is stateless between sessions; its only
   durable secret is the mnemonic, backed up as a seed phrase.
-- **GraphQL/gRPC front-end** — REST is what RLN speaks today; other transports are a
-  gateway-layer swap that changes no SDK surface.
+- **GraphQL/gRPC front-end** — a gateway-layer swap that changes no SDK surface.
+
+The design doc's "Known gaps and deferred work" section lists the rest, including the
+rgb-node-api limits (asset schemas, one wallet thread).
 
 ## Workspace commands
 
@@ -65,16 +64,16 @@ pnpm test    # unit tests (gateway + client-sdk + the e2e package's
              # infra-free smoke test; the regtest journey is excluded)
 pnpm lint    # eslint + prettier check
 pnpm format  # prettier --write
-pnpm e2e     # regtest e2e journey (requires local infra, see below)
+pnpm e2e     # regtest e2e journey (requires the regtest stack, see below)
 ```
 
-Two gateway suites additionally exercise the **real** rgb-lib backend against regtest and
-are skipped unless opted in (`describe.runIf(process.env['WALLET_REGTEST'] === '1')`):
+Two gateway suites additionally exercise the **real** rgb-node-api against regtest and are
+skipped unless opted in (`describe.runIf(process.env['WALLET_REGTEST'] === '1')`):
 
 ```sh
-ESPLORA=1 ./regtest.sh start   # from $RLN_REPO, on a fresh chain
-WALLET_REGTEST=1 pnpm --filter @utexo/rln-gateway test wallet-integration
-WALLET_REGTEST=1 pnpm --filter @utexo/rln-gateway test onchain-integration
+./regtest/regtest.sh start   # on a fresh chain
+WALLET_REGTEST=1 pnpm --filter @utexo/lightsdk-gateway test wallet-integration
+WALLET_REGTEST=1 pnpm --filter @utexo/lightsdk-gateway test onchain-integration
 ```
 
 Run `wallet-integration` first: the two share a fixture account, and the on-chain suite
@@ -82,60 +81,46 @@ creates colorable UTXOs that would break the other's `INSUFFICIENT_FUNDS` assert
 
 ### Generated files
 
-- `packages/gateway/src/rln/openapi.ts` — regenerate with
-  `pnpm --filter @utexo/rln-gateway generate:rln-types` whenever rgb-lightning-node's
-  `openapi.yaml` (read from `$RLN_REPO`) changes an endpoint the gateway calls.
 - `packages/client-sdk/test/fixtures/rgblib-parity.json` — regenerate with
   `pnpm --filter @utexo/lightweight-client-sdk generate:fixtures` on an `@utexo/rgb-lib`
-  bump.
+  bump (linux-x64 only: the native module is that package's optional dependency).
 
-## The rgb-lightning-node checkout
+## Regtest stack
 
-Operations that need RLN itself use an rgb-lightning-node checkout named by `RLN_REPO`
-(default `../rgb-lightning-node`, a sibling of this repository):
-
-- the regtest stack — its `regtest.sh` and compose file (bitcoind, electrs, RGB proxy,
-  esplora) and the `regtest.sh` fund/mine helpers, used by `pnpm e2e`, the
-  `WALLET_REGTEST` suites and `scripts/preflight-a.cjs`;
-- the RLN binary the e2e journey starts, `$RLN_REPO/target/debug/rgb-lightning-node`
-  (`cargo build` there first);
-- `openapi.yaml`, the input of `generate:rln-types`.
-
-The unit tests, build and lint need none of it.
-
-## Regtest bring-up (verified 2026-09-09, Preflight B)
-
-From the rgb-lightning-node checkout (`$RLN_REPO`):
+`regtest/` holds a self-contained docker compose stack — bitcoind, electrs, esplora, the
+RGB proxy and rgb-node-api — driven by `regtest/regtest.sh`. It is used by `pnpm e2e` and
+the `WALLET_REGTEST` suites.
 
 ```sh
-# 1. start bitcoind + electrs (tcp://localhost:50001) + RGB proxy (http://localhost:3000);
-#    ESPLORA=1 additionally starts the esplora REST API on http://localhost:3002
-ESPLORA=1 ./regtest.sh start
-
-# 2. build (if needed) and start an RLN instance
-cargo build
-mkdir -p /tmp/rln-data
-target/debug/rgb-lightning-node /tmp/rln-data --daemon-listening-port 3101 \
-    --ldk-peer-listening-port 9835 --network regtest --disable-authentication
-
-# 3. init + unlock, then verify the node answers
-curl -X POST http://localhost:3101/init -H 'Content-Type: application/json' \
-    -d '{"password":"nodepassword"}'
-curl -X POST http://localhost:3101/unlock -H 'Content-Type: application/json' -d '{
-  "password": "nodepassword",
-  "ldk_chain_sync": {"mode": "BlockSync", "config": {
-    "bitcoind_rpc_username": "user", "bitcoind_rpc_password": "password",
-    "bitcoind_rpc_host": "localhost", "bitcoind_rpc_port": 18443}},
-  "indexer_url": "127.0.0.1:50001",
-  "proxy_endpoint": "rpc://127.0.0.1:3000/json-rpc",
-  "announce_addresses": []}'
-curl http://localhost:3101/nodeinfo
-
-# teardown (stops containers and deletes data dirs)
-./regtest.sh stop
+./regtest/regtest.sh start                       # fresh chain, all services up
+./regtest/regtest.sh mine <blocks>               # mine to the miner wallet
+./regtest/regtest.sh sendtoaddress <addr> <btc>  # pay from the miner wallet
+./regtest/regtest.sh stop                        # stop and delete all data
 ```
 
-`--disable-authentication` is acceptable strictly because RLN listens on localhost and
-only the gateway talks to it (design doc invariant I4); never expose RLN publicly.
+- rgb-node-api is built from source on the first `start`
+  (`https://github.com/UTEXO-Protocol/rgb-node-api.git#main`, several minutes). Some of its
+  pinned git dependencies are private, so the build fetches them over SSH with your
+  forwarded ssh-agent: the agent needs a key with read access to the UTEXO-Protocol
+  repositories. Set `RGB_NODE_API_CONTEXT` to a local checkout or another git ref to test a
+  different revision, and rebuild with
+  `docker compose -f regtest/compose.yaml build rgb-node-api`.
+- Only rgb-node-api (`http://127.0.0.1:34000`) and esplora (`http://127.0.0.1:3002`) are
+  published on the host; move them with `REGTEST_RGB_NODE_API_PORT` /
+  `REGTEST_ESPLORA_PORT` if those ports are taken. bitcoind, electrs and the RGB proxy are
+  reached by rgb-node-api over the compose network, which is why invoices carry
+  `rpc://proxy:3000/json-rpc` and the regtest suites configure the gateway's
+  `RGB_PROXY_URL` to match.
+- rgb-node-api has no authentication and is published on localhost only. Never expose it
+  publicly (design doc invariant I4).
 
-Fund/mine helpers: `./regtest.sh sendtoaddress <addr> <amount>`, `./regtest.sh mine <blocks>`.
+To run the gateway by hand against the stack:
+
+```sh
+RGB_NODE_API_URL=http://127.0.0.1:34000 \
+ESPLORA_URL=http://127.0.0.1:3002 \
+RGB_PROXY_URL=rpc://proxy:3000/json-rpc \
+GATEWAY_SQLITE_PATH=/tmp/lightsdk-gateway.sqlite \
+GATEWAY_OPERATOR_TOKEN=<random, 16+ chars> \
+pnpm --filter @utexo/lightsdk-gateway start
+```

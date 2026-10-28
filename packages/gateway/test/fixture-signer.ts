@@ -7,6 +7,7 @@ import { HDKey } from '@scure/bip32';
 import { mnemonicToSeedSync } from '@scure/bip39';
 import { base64 } from '@scure/base';
 import { Transaction } from '@scure/btc-signer';
+import type { UserXpubs } from '../src/wallets/backend.js';
 
 export const PSBT_PARSE_OPTIONS = {
   allowUnknownInputs: true,
@@ -15,6 +16,24 @@ export const PSBT_PARSE_OPTIONS = {
 
 export function masterFromMnemonic(mnemonic: string): HDKey {
   return HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic));
+}
+
+/** tprv/tpub version bytes (regtest serializes extended keys like testnet). */
+const TESTNET_VERSIONS = { private: 0x04358394, public: 0x043587cf };
+
+/**
+ * The account xpubs a client registers for a fixture mnemonic on regtest:
+ * BIP-86 account 0 on the vanilla (coin 1) and colored (RGB coin 827167)
+ * sides, as rgb-lib derives them.
+ */
+export function regtestXpubsFromMnemonic(mnemonic: string): UserXpubs {
+  const master = HDKey.fromMasterSeed(mnemonicToSeedSync(mnemonic), TESTNET_VERSIONS);
+  const account = (coin: number): string => master.derive(`m/86'/${coin}'/0'`).publicExtendedKey;
+  return {
+    vanilla: account(1),
+    colored: account(827167),
+    fingerprint: master.fingerprint.toString(16).padStart(8, '0'),
+  };
 }
 
 /**

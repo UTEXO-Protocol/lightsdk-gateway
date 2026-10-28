@@ -1,0 +1,98 @@
+# Regtest stack for the gateway's WALLET_REGTEST suites and the e2e journey.
+# Drive it through ./regtest.sh (start/stop/mine/sendtoaddress), not directly.
+#
+# Only the two services the gateway itself calls are published on the host:
+# rgb-node-api and esplora (fee estimates). bitcoind, electrs and the RGB proxy
+# are reached by rgb-node-api over the compose network by service name, which
+# is also why invoices carry `rpc://proxy:3000/json-rpc` as their transport.
+name: lightsdk-gateway-regtest
+
+services:
+  bitcoind:
+    image: bitcoin/bitcoin:30-alpine
+    # -fallbackfee: regtest has no fee-estimation history, so wallet sends fail
+    # with "Fee estimation failed" unless a fallback rate is provided.
+    command:
+      - -regtest
+      - -txindex
+      - -server
+      - -rpcuser=dev
+      - -rpcpassword=dev
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -fallbackfee=0.0001
+
+  electrs:
+    image: registry.gitlab.com/hashbeam/docker/electrs:0.10.9
+    environment:
+      BTCHOST: bitcoind
+      BTCRPCPORT: '18443'
+      BTCP2PPORT: '18444'
+      BTCUSER: dev
+      BTCPASS: dev
+    depends_on:
+      - bitcoind
+
+  esplora:
+    image: mempool/electrs:v3.2.0
+    command:
+      - --jsonrpc-import
+      - --cookie=dev:dev
+      - --network=regtest
+      - --daemon-rpc-addr=bitcoind:18443
+      - --http-addr=0.0.0.0:3002
+    ports:
+      - 127.0.0.1:${REGTEST_ESPLORA_PORT:-3002}:3002
+    depends_on:
+      - bitcoind
+
+  # The image rgb-lib's own test suite runs against, so it speaks the proxy
+  # protocol version rgb-lib requires.
+  proxy:
+    image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
+
+  # Built from source on first start (takes several minutes). Point
+  # RGB_NODE_API_CONTEXT at a local checkout or another git ref to test a
+  # different revision; `docker compose -f regtest/compose.yaml build
+  # rgb-node-api` rebuilds.
+  #
+  # Some of rgb-node-api's pinned git dependencies (the BFA RGB crates) are
+  # private, so its own Dockerfile cannot fetch them anonymously. This build
+  # fetches them over SSH with the host's forwarded ssh-agent instead: the
+  # agent must hold a key with read access to the UTEXO-Protocol repositories.
+  rgb-node-api:
+    build:
+      context: ${RGB_NODE_API_CONTEXT:-https://github.com/UTEXO-Protocol/rgb-node-api.git#main}
+      ssh:
+        - default
+      dockerfile_inline: |
+        # syntax=docker/dockerfile:1
+        FROM rust:1.96 AS builder
+        RUN apt-get update \
+          && apt-get install -y --no-install-recommends cmake git openssh-client pkgconf \
+          && rm -rf /var/lib/apt/lists/*
+        RUN mkdir -p -m 0700 /root/.ssh \
+          && echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> /root/.ssh/known_hosts \
+          && git config --global url.'ssh://git@github.com/'.insteadOf 'https://github.com/'
+        WORKDIR /opt/utexo
+        COPY . .
+        RUN --mount=type=ssh CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --bin rgb-node-api
+
+        FROM debian:stable-slim
+        RUN apt-get update \
+          && apt-get install -y --no-install-recommends ca-certificates \
+          && rm -rf /var/lib/apt/lists/*
+        WORKDIR /opt/utexo
+        COPY --from=builder /opt/utexo/target/release/rgb-node-api /usr/local/bin/rgb-node-api
+        ENV RUST_LOG=info
+        ENTRYPOINT ["rgb-node-api"]
+    image: lightsdk-gateway-regtest/rgb-node-api:local
+    command: ['-c', '/etc/rgb-node-api.toml']
+    volumes:
+      - ./rgb-node-api.toml:/etc/rgb-node-api.toml:ro
+    ports:
+      - 127.0.0.1:${REGTEST_RGB_NODE_API_PORT:-34000}:34000
+    depends_on:
+      - bitcoind
+      - electrs
+      - proxy

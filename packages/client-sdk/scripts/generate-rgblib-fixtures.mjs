@@ -1,6 +1,5 @@
 // Regenerates test/fixtures/rgblib-parity.json from the REAL rgb-lib native
-// binding (successor of Task 1's preflight script; see scripts/preflight-a.cjs
-// at the workspace root). Everything here runs OFFLINE — no regtest needed:
+// binding. Everything here runs OFFLINE — no regtest needed:
 // wallet construction, address derivation and BDK signing are all local.
 //
 // The fixture is the ground truth the client SDK must reproduce exactly:
@@ -11,7 +10,8 @@
 //  - a PSBT hand-built with @scure, signed+finalized by rgb-lib's own BDK
 //    signer (sign_psbt), with its txid and witness
 //
-// Run (needs the gateway package installed for the native module):
+// Run (linux-x64 only: the native module is this package's optional
+// dependency):
 //   pnpm --filter @utexo/lightweight-client-sdk generate:fixtures
 import { createRequire } from 'node:module';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -19,10 +19,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const OUT = new URL('../test/fixtures/rgblib-parity.json', import.meta.url);
-const gatewayRequire = createRequire(new URL('../../gateway/package.json', import.meta.url));
-const lib = gatewayRequire('@utexo/rgb-lib-linux-x64/rgblib');
-
 const sdkRequire = createRequire(new URL('../package.json', import.meta.url));
+const lib = sdkRequire('@utexo/rgb-lib-linux-x64/rgblib');
+
 const { Transaction, p2tr } = await import(sdkRequire.resolve('@scure/btc-signer'));
 const { base64, hex } = await import(sdkRequire.resolve('@scure/base'));
 const { HDKey } = await import(sdkRequire.resolve('@scure/bip32'));

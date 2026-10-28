@@ -1,17 +1,18 @@
 /**
- * Scripted user journey over the full stack (regtest + shared RLN +
- * counterparty RLN + gateway). The journey uses ONLY the client SDK against
- * the gateway's real HTTP port — never RLN directly; the counterparty node
- * and the faucet are driven by the harness as "the outside world".
+ * Scripted user journey over the full stack (regtest + rgb-node-api + gateway).
+ * The journey uses ONLY the client SDK against the gateway's real HTTP port —
+ * never rgb-node-api directly; the counterparty wallet and the faucet are
+ * driven by the harness as "the outside world".
  *
  * Trust invariants are asserted while the journey runs:
  *  - I1: every gateway response is scanned for key-material field names and
  *    for the client mnemonics (scanning fetch installed in every client).
- *  - I3: a second user cannot see the first user's invoices/payments/
- *    transfers.
- *  - I4: the RLN admin-token sentinel and operator token appear in no
- *    response and no captured gateway log line.
- *  - A replayed pay with the same idempotency key does not double-debit.
+ *  - I3: a second user cannot see the first user's operations, transfers,
+ *    unspents or balances.
+ *  - I4: the operator token appears in no response and no captured gateway
+ *    log line.
+ *  - A replayed send-btc completion with the same idempotency key does not
+ *    send twice.
  *
  * The send-asset leg is load-bearing beyond the journey itself: it is the only
  * place verifyAndSignPsbt runs against a PSBT rgb-lib actually emitted for a
@@ -37,7 +38,6 @@ import {
   OPERATOR_TOKEN,
   regtest,
   retryUntil,
-  rln,
   setupHarness,
   sleep,
   type Harness,
@@ -48,11 +48,7 @@ const UTXO_NUM = 5;
 const UTXO_SIZE_SAT = 5_000;
 const RGB_RECEIVE_UNITS = 100;
 const RGB_SEND_BACK_UNITS = 40;
-const DEPOSIT_SAT = 200_000;
-const DEPOSIT_MSAT = DEPOSIT_SAT * 1000;
-const PAY_MSAT = 50_000_000;
-const INVOICE_MSAT = 30_000_000;
-const WITHDRAW_SAT = 180_000; // deposit - pay + invoice, in whole sats
+const SEND_BTC_SAT = 1_000_000;
 const MAX_FEE_SAT = 2_000;
 const FEE_RATE = 2;
 
@@ -67,8 +63,8 @@ let harness: Harness;
 let userA: JourneyUser;
 let userB: JourneyUser;
 let vaultAddress: string;
-let payHash: string;
-let inboundHash: string;
+/** One of user A's prepared operations, for the I3 check. */
+let userAOpId: string;
 
 /** Sign a prepared op with the journey user's keys — verify-before-sign. */
 function sign(user: JourneyUser, prepared: PreparedOp): string {
@@ -139,6 +135,7 @@ describe('lightweight-sdk e2e journey on regtest', () => {
       feeRateSatPerVb: FEE_RATE,
     });
     expect(prepared.intent.kind).toBe('create_utxos');
+    userAOpId = prepared.opId;
     const completed = await userA.client.completeCreateUtxos({
       opId: prepared.opId,
       signedPsbt: sign(userA, prepared),
@@ -160,20 +157,7 @@ describe('lightweight-sdk e2e journey on regtest', () => {
     const receive = await userA.client.receive({ mode: 'blind' });
     expect(receive.invoice.length).toBeGreaterThan(20);
 
-    await rln(harness.cp.base, '/sendrgb', {
-      donation: false,
-      fee_rate: FEE_RATE,
-      min_confirmations: 1,
-      recipient_map: {
-        [harness.assetId]: [
-          {
-            recipient_id: receive.recipientId,
-            assignment: { type: 'Fungible', value: RGB_RECEIVE_UNITS },
-            transport_endpoints: ['rpc://127.0.0.1:3000/json-rpc'],
-          },
-        ],
-      },
-    });
+    await harness.cp.sendAsset(harness.assetId, receive.recipientId, RGB_RECEIVE_UNITS);
 
     // Settlement dance (donation=false): receiver ACKs via refresh, the
     // sender's refresh broadcasts, one confirmation settles both sides.
@@ -181,7 +165,7 @@ describe('lightweight-sdk e2e journey on regtest', () => {
       'RGB asset settled in the vault',
       async () => {
         await userA.client.sync();
-        await rln(harness.cp.base, '/refreshtransfers', { filter: [], skip_sync: false });
+        await harness.cp.refresh();
         const balances = await userA.client.getBalances();
         const asset = balances.assets.find((entry) => entry.assetId === harness.assetId);
         if (asset !== undefined && asset.balance.settled >= RGB_RECEIVE_UNITS) return true;
@@ -203,19 +187,13 @@ describe('lightweight-sdk e2e journey on regtest', () => {
     // COLORED spend: the opret commitment output, the colored-account key
     // origins and the RGB change output all have to satisfy verifyPsbt, which
     // hand-built fixtures cannot prove.
-    const back = await rln<{ recipient_id: string }>(harness.cp.base, '/rgbinvoice', {
-      min_confirmations: 1,
-      asset_id: harness.assetId,
-      assignment: { type: 'Fungible', value: RGB_SEND_BACK_UNITS },
-      witness: false,
-      transport_endpoints: ['rpc://127.0.0.1:3000/json-rpc'],
-    });
+    const recipientId = await harness.cp.blindReceive(harness.assetId);
 
     const prepared = await userA.client.prepareSendAsset(
       {
         assetId: harness.assetId,
         amount: RGB_SEND_BACK_UNITS,
-        recipientId: back.recipient_id,
+        recipientId,
         feeRateSatPerVb: FEE_RATE,
       },
       generateIdempotencyKey(),
@@ -233,12 +211,14 @@ describe('lightweight-sdk e2e journey on regtest', () => {
       'RGB send settled on both sides',
       async () => {
         await userA.client.sync();
-        await rln(harness.cp.base, '/refreshtransfers', { filter: [], skip_sync: false });
+        await harness.cp.refresh();
         const balances = await userA.client.getBalances();
         const asset = balances.assets.find((entry) => entry.assetId === harness.assetId);
         if (
           asset !== undefined &&
-          asset.balance.settled === RGB_RECEIVE_UNITS - RGB_SEND_BACK_UNITS
+          asset.balance.settled === RGB_RECEIVE_UNITS - RGB_SEND_BACK_UNITS &&
+          (await harness.cp.assetSettled(harness.assetId)) ===
+            1000 - RGB_RECEIVE_UNITS + RGB_SEND_BACK_UNITS
         ) {
           return true;
         }
@@ -250,153 +230,79 @@ describe('lightweight-sdk e2e journey on regtest', () => {
     );
   }, 240_000);
 
-  it('deposits BTC from the vault into the LN float', async () => {
-    const deposit = await userA.client.prepareLnDeposit({ kind: 'btc', amountMsat: DEPOSIT_MSAT });
-    expect(deposit.kind).toBe('btc');
-    const target = deposit.address as string;
-    expect(target).toMatch(/^bcrt1/);
+  it('sends BTC on chain to the counterparty; a replayed complete does not send twice', async () => {
+    const cpAddress = await harness.cp.address();
+    const cpBefore = (await harness.cp.call<{ vanilla: { settled: number } }>('btcbalance')).vanilla
+      .settled;
 
-    const prepared = await userA.client.prepareSendBtc({
-      address: target,
-      amountSat: DEPOSIT_SAT,
-      feeRateSatPerVb: FEE_RATE,
-    });
-    expect(prepared.intent.recipients[0]?.amountSat).toBe(DEPOSIT_SAT);
-    const completed = await userA.client.completeSendBtc({
-      opId: prepared.opId,
-      signedPsbt: sign(userA, prepared),
-    });
+    const prepared = await userA.client.prepareSendBtc(
+      { address: cpAddress, amountSat: SEND_BTC_SAT, feeRateSatPerVb: FEE_RATE },
+      generateIdempotencyKey(),
+    );
+    expect(prepared.intent.kind).toBe('send_btc');
+
+    const completeKey = generateIdempotencyKey();
+    const params = { opId: prepared.opId, signedPsbt: sign(userA, prepared) };
+    const completed = await userA.client.completeSendBtc(params, completeKey);
     expect(completed.txid).toMatch(/^[0-9a-f]{64}$/);
+    // Same key, same body: the cached response comes back and nothing is
+    // broadcast again.
+    const replayed = await userA.client.completeSendBtc(params, completeKey);
+    expect(replayed.txid).toBe(completed.txid);
+    expect((await userA.client.getOnchainOperation(prepared.opId)).state).toBe('completed');
+
     mine(1);
-
     await retryUntil(
-      'deposit credited to the float ledger',
+      'BTC arrived at the counterparty',
       async () => {
-        const balance = await userA.client.getLnBalance();
-        return balance.btcMsat >= DEPOSIT_MSAT ? true : undefined;
+        const balance = await harness.cp.call<{ vanilla: { settled: number } }>('btcbalance');
+        return balance.vanilla.settled >= cpBefore + SEND_BTC_SAT ? true : undefined;
       },
       90_000,
     );
-    const balance = await userA.client.getLnBalance();
-    expect(balance.btcMsat).toBe(DEPOSIT_MSAT);
-  }, 180_000);
+    const cpAfter = (await harness.cp.call<{ vanilla: { settled: number } }>('btcbalance')).vanilla
+      .settled;
+    expect(cpAfter).toBe(cpBefore + SEND_BTC_SAT);
 
-  it('pays a BOLT11 invoice from the counterparty; replay does not double-debit', async () => {
-    const cpInvoice = await rln<{ invoice: string }>(harness.cp.base, '/lninvoice', {
-      amt_msat: PAY_MSAT,
-      expiry_sec: 3600,
-      asset_id: null,
-      asset_amount: null,
-    });
-
-    const key = generateIdempotencyKey();
-    const paid = await userA.client.payLnInvoice({ invoice: cpInvoice.invoice }, key);
-    expect(paid.status).not.toBe('failed');
-    payHash = paid.paymentHash;
-
-    // Same idempotency key + same body: cached response, no second debit.
-    const replayed = await userA.client.payLnInvoice({ invoice: cpInvoice.invoice }, key);
-    expect(replayed.paymentHash).toBe(payHash);
-
-    await retryUntil(
-      'counterparty saw the payment settle',
-      async () => {
-        const { status } = await rln<{ status: string }>(harness.cp.base, '/invoicestatus', {
-          invoice: cpInvoice.invoice,
-        });
-        return status === 'Succeeded' ? true : undefined;
-      },
-      90_000,
-    );
-    await retryUntil(
-      'gateway reconciled the outbound payment',
-      async () => {
-        const { payments } = await userA.client.listLnPayments();
-        const entry = payments.find((p) => p.paymentHash === payHash);
-        return entry?.status === 'succeeded' && entry.direction === 'outbound' ? true : undefined;
-      },
-      90_000,
-    );
-    // Debited exactly once, despite the replay.
-    const balance = await userA.client.getLnBalance();
-    expect(balance.btcMsat).toBe(DEPOSIT_MSAT - PAY_MSAT);
-  }, 180_000);
-
-  it('creates an invoice and is paid by the counterparty', async () => {
-    const created = await userA.client.createLnInvoice({ amtMsat: INVOICE_MSAT });
-    inboundHash = created.paymentHash;
-
-    await rln(harness.cp.base, '/sendpayment', { invoice: created.invoice });
-
-    await retryUntil(
-      'inbound invoice settled and credited',
-      async () => {
-        const info = await userA.client.getLnInvoice(inboundHash);
-        return info.state === 'settled' ? true : undefined;
-      },
-      90_000,
-    );
-    const balance = await userA.client.getLnBalance();
-    expect(balance.btcMsat).toBe(DEPOSIT_MSAT - PAY_MSAT + INVOICE_MSAT);
+    // The vault reports the send exactly once, under its txid.
+    const { transactions } = await userA.client.getTransactions(completed.txid);
+    expect(transactions).toEqual([
+      expect.objectContaining({ transactionType: 'SendBtc', txid: completed.txid }),
+    ]);
   }, 180_000);
 
   it('scopes user A resources away from user B (I3)', async () => {
     userB = await createJourneyUser('user-b');
 
-    const foreignInvoice = await userB.client.getLnInvoice(inboundHash).catch((e: unknown) => e);
-    expect(foreignInvoice).toBeInstanceOf(GatewayError);
-    expect((foreignInvoice as GatewayError).status).toBe(404);
+    // A's prepared operation is indistinguishable from a missing one.
+    const foreignOp = await userB.client.getOnchainOperation(userAOpId).catch((e: unknown) => e);
+    expect(foreignOp).toBeInstanceOf(GatewayError);
+    expect((foreignOp as GatewayError).status).toBe(404);
 
-    const { payments } = await userB.client.listLnPayments();
-    expect(payments).toEqual([]);
-
-    const balance = await userB.client.getLnBalance();
-    expect(balance.btcMsat).toBe(0);
-    expect(balance.assets).toEqual({});
-
-    // B's own vault is empty: A's transfers/unspents are simply not there.
+    // B's own vault is empty: A's unspents and assets are simply not there.
     const xpubs = userB.keys.xpubs;
     await userB.client.registerXpubs({
       vanilla: xpubs.vanilla,
       colored: xpubs.colored,
       fingerprint: xpubs.fingerprint,
     });
-    expect((await userB.client.getTransfers()).transfers).toEqual([]);
     expect((await userB.client.getUnspents()).unspents).toEqual([]);
     const balances = await userB.client.getBalances();
     expect(balances.btc.vanilla.settled).toBe(0);
     expect(balances.assets).toEqual([]);
+
+    // Nobody else can claim A's master fingerprint either: rgb-node-api keys
+    // wallets by fingerprint and would serve A's wallet for it.
+    const userC = await createJourneyUser('user-c');
+    const stolen = await userC.client
+      .registerXpubs({ ...userA.keys.xpubs })
+      .catch((e: unknown) => e);
+    expect(stolen).toBeInstanceOf(GatewayError);
+    expect((stolen as GatewayError).status).toBe(409);
+    expect((stolen as GatewayError).code).toBe('FINGERPRINT_IN_USE');
+
+    expect((await userB.client.getTransfers()).transfers).toEqual([]);
   }, 120_000);
-
-  it('withdraws the remaining float back to the vault; balances reconcile', async () => {
-    const before = await userA.client.getLnBalance();
-    expect(before.btcMsat).toBe(WITHDRAW_SAT * 1000);
-    const vaultBefore = (await userA.client.getBalances()).btc.vanilla.settled;
-
-    const withdrawn = await userA.client.withdrawLn({
-      kind: 'btc',
-      address: vaultAddress,
-      amountSat: WITHDRAW_SAT,
-      feeRateSatPerVb: FEE_RATE,
-    });
-    expect(withdrawn.txid).toMatch(/^[0-9a-f]{64}$/);
-    mine(1);
-
-    await retryUntil(
-      'withdrawal arrived in the vault',
-      async () => {
-        await userA.client.sync();
-        const balances = await userA.client.getBalances();
-        return balances.btc.vanilla.settled >= vaultBefore + WITHDRAW_SAT ? true : undefined;
-      },
-      90_000,
-    );
-
-    // Full reconciliation: deposit - pay + invoice - withdraw == 0.
-    const after = await userA.client.getLnBalance();
-    expect(after.btcMsat).toBe(DEPOSIT_MSAT - PAY_MSAT + INVOICE_MSAT - WITHDRAW_SAT * 1000);
-    expect(after.btcMsat).toBe(0);
-  }, 180_000);
 
   it('never leaked key material or credentials (I1/I4)', async () => {
     // Let in-flight worker log lines land before scanning.

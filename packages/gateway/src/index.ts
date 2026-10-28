@@ -1,7 +1,8 @@
 /**
- * @utexo/rln-gateway — API gateway in front of one shared RLN instance.
+ * @utexo/lightsdk-gateway — API gateway in front of the rgb-node-api service that
+ * hosts per-user watch-only RGB wallets.
  */
-export const GATEWAY_NAME = '@utexo/rln-gateway';
+export const GATEWAY_NAME = '@utexo/lightsdk-gateway';
 
 export { loadConfig, ConfigError, type GatewayConfig } from './config.js';
 export { openDb, migrate, schemaVersion, type GatewayDb } from './db.js';
@@ -31,47 +32,14 @@ export {
   KEY_MATERIAL_FIELD_NAMES,
 } from './schemas/scan.js';
 export {
-  RlnClient,
-  RlnHttpError,
-  RlnNetworkError,
-  RlnTimeoutError,
-  sanitizeRlnError,
-  DEFAULT_RLN_TIMEOUT_MS,
-  type RlnApi,
-  type RlnClientOptions,
-} from './rln/client.js';
-export {
-  BTC_ASSET,
-  FloatCapExceededError,
-  InsufficientBalanceError,
-  Ledger,
-  type LedgerEntryParams,
-  type LedgerKind,
-  type LedgerRow,
-} from './ledger.js';
-export {
-  LnFlows,
-  mapHtlcStatus,
-  refundOutboundPayment,
-  refundWithdrawal,
-  settleInboundInvoice,
-  type GatewayPaymentStatus,
-  type LnInvoiceRow,
-} from './routes/ln.js';
-export { DepositsWorker, type DepositsWorkerOptions } from './workers/deposits.js';
-export { Reconciler, type ReconcilerOptions } from './workers/reconciler.js';
-export {
   recordOwnership,
   ownerOf,
   updateResourceState,
   filterOwned,
-  scopePayments,
-  scopeTransfers,
   OwnershipConflictError,
   type ResourceKind,
   type ResourceRecord,
-} from './rln/scoping.js';
-export type * from './rln/types.js';
+} from './scoping.js';
 export {
   WalletBackendError,
   type Balance,
@@ -84,16 +52,17 @@ export {
   type WalletBackend,
   type WalletBtcBalance,
   type WalletHandle,
+  type WalletBlockTime,
   type WalletIdentity,
+  type WalletTransaction,
   type WalletTransfer,
   type WalletUnspent,
 } from './wallets/backend.js';
 export {
-  NativeWalletBackend,
-  loadNativeRgbLib,
-  restoreKeysForTests,
-  type NativeWalletBackendOptions,
-} from './wallets/rgblib.js';
+  RgbNodeApiWalletBackend,
+  DEFAULT_WALLET_SERVICE_TIMEOUT_MS,
+  type RgbNodeApiBackendOptions,
+} from './wallets/rgbnodeapi.js';
 export { WalletOpQueues } from './wallets/queue.js';
 export { WalletPool, type WalletPoolOptions } from './wallets/pool.js';
 export {

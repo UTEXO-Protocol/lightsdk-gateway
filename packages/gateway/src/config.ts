@@ -1,67 +1,49 @@
 /**
  * Typed gateway configuration loaded from environment variables.
  *
- * The RLN admin token and operator token are credentials: they must never be
- * logged or echoed in any response (invariant I4).
+ * The operator token is a credential: it must never be logged or echoed in any
+ * response (invariant I4).
  */
 
 export interface GatewayConfig {
   /** Interface the gateway listens on. Defaults to loopback. */
   host: string;
   port: number;
-  /** Base URL of the single shared RLN instance (reachable only from the gateway). */
-  rlnUrl: string;
-  /** Biscuit admin token; empty when RLN runs with --disable-authentication on localhost. */
-  rlnAdminToken: string;
+  /**
+   * Base URL of the rgb-node-api service hosting the watch-only wallets. It has
+   * no authentication of its own, so it must be reachable only from the gateway.
+   */
+  walletServiceUrl: string;
+  /** Per-call timeout for rgb-node-api requests (ms). */
+  walletServiceTimeoutMs: number;
   esploraUrl: string;
+  /**
+   * Default RGB consignment proxy for sends. Receive invoices carry
+   * rgb-node-api's own `proxy_address` instead, so keep the two identical.
+   */
   rgbProxyUrl: string;
   /** Path to the gateway SQLite database (':memory:' for tests). */
   sqlitePath: string;
-  /** Gateway-owned directory holding one watch-only wallet data-dir per user. */
-  walletsDir: string;
   /**
-   * Indexer URL passed to rgb-lib `goOnline`. Either an Electrum server
-   * (`host:port`, `ssl://host:port`) or an esplora REST base URL
-   * (`https://…`) — the published rgb-lib native module is built with BOTH the
-   * `electrum` and `esplora` features, and rgb-lib picks the client by probing
-   * Electrum first and falling back to esplora.
-   *
-   * They are NOT equivalent. rgb-lib's Electrum resolver additionally requires
-   * verbose-transaction support and, on the default signet, the presence of a
-   * specific probe transaction; its esplora resolver checks only the genesis
-   * hash. So a Blockstream/mempool `electrs` is rejected over its Electrum port
-   * but works over its esplora REST port. See the README's indexer section.
+   * rgb-lib BitcoinNetwork of the user wallets: must match rgb-node-api's
+   * `network`. The gateway uses it to decode recipient addresses and to
+   * attribute deposit addresses to their derivation path.
    */
-  walletIndexerUrl: string;
-  /** rgb-lib BitcoinNetwork for user wallets. */
   bitcoinNetwork: 'Mainnet' | 'Testnet' | 'Testnet4' | 'Signet' | 'SignetCustom' | 'Regtest';
-  /** LRU capacity of the open-wallet pool. */
+  /**
+   * LRU capacity of the open-wallet pool. An evicted wallet is also dropped
+   * from rgb-node-api's memory, so this bounds what that service keeps loaded.
+   */
   walletMaxOpen: number;
   /** Seconds an unsigned prepare-step PSBT stays completable before expiring. */
   onchainOpTtlSeconds: number;
   /** Guards the bootstrap-only POST /v1/users route. */
   operatorToken: string;
-  /** Custodial LN float caps (Block 3): enforced at ledger credit/debit time. */
-  floatCapPerUserMsat: number;
-  floatCapGlobalMsat: number;
-  /** Confirmations before a BTC/RGB deposit is credited to the float ledger. */
-  depositMinConfirmations: number;
-  /** Seconds an unfunded deposit intent stays pending (and counts against caps). */
-  depositTtlSeconds: number;
   /**
-   * HTLC carrier value (msat) put on asset invoices that declare no msat
-   * amount. RLN refuses an asset invoice below the channel HTLC minimum, so
-   * this must match the node's `channels.htlc_min_msat` (RLN default 3_000_000)
-   * or the higher `inbound_htlc_minimum_msat` of the asset's channels.
-   */
-  assetInvoiceMinMsat: number;
-  /**
-   * RGB consignment-proxy endpoints users may name in withdraw/send-asset
-   * requests (SSRF guard — the node dials these). Always includes rgbProxyUrl.
+   * RGB consignment-proxy endpoints users may name in send-asset requests
+   * (SSRF guard — the wallet service dials these). Always includes rgbProxyUrl.
    */
   rgbTransportAllowlist: string[];
-  /** Poll interval of the deposits watcher (ms). */
-  depositsIntervalMs: number;
   /** Poll interval of the ambiguous-completion worker (ms). */
   completionsIntervalMs: number;
   /**
@@ -69,14 +51,6 @@ export interface GatewayConfig {
    * before leaving it to an operator.
    */
   completionsMaxAttempts: number;
-  /** Poll interval of the payments reconciler (ms). */
-  reconcilerIntervalMs: number;
-  /**
-   * Seconds a debited-pending outbound payment RLN does not know about must
-   * age before the reconciler refunds it (the send may still be queued behind
-   * RLN's global lock — refunding too early would double-spend the float).
-   */
-  reconcilerGraceSeconds: number;
   /** Max downstream operations running at once across all users. */
   queueGlobalConcurrency: number;
   /** Max queued+running operations per user before 429. */
@@ -166,28 +140,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     host: env['GATEWAY_HOST']?.trim() || '127.0.0.1',
     port: intWithDefault(env, 'GATEWAY_PORT', 8480),
-    rlnUrl: requireUrl(env, 'RLN_URL'),
-    rlnAdminToken: env['RLN_ADMIN_TOKEN']?.trim() ?? '',
+    walletServiceUrl: requireUrl(env, 'RGB_NODE_API_URL'),
+    walletServiceTimeoutMs: intWithDefault(env, 'GATEWAY_WALLET_SERVICE_TIMEOUT_MS', 60_000),
     esploraUrl: requireUrl(env, 'ESPLORA_URL'),
     rgbProxyUrl,
     sqlitePath: requireString(env, 'GATEWAY_SQLITE_PATH'),
-    walletsDir: requireString(env, 'GATEWAY_WALLETS_DIR'),
-    walletIndexerUrl: requireString(env, 'GATEWAY_WALLET_INDEXER_URL'),
     bitcoinNetwork: bitcoinNetwork(env),
     walletMaxOpen: intWithDefault(env, 'GATEWAY_WALLET_MAX_OPEN', 32),
     onchainOpTtlSeconds: intWithDefault(env, 'GATEWAY_ONCHAIN_OP_TTL_SECONDS', 600),
     operatorToken,
-    floatCapPerUserMsat: intWithDefault(env, 'GATEWAY_FLOAT_CAP_PER_USER_MSAT', 1_000_000_000),
-    floatCapGlobalMsat: intWithDefault(env, 'GATEWAY_FLOAT_CAP_GLOBAL_MSAT', 10_000_000_000),
-    depositMinConfirmations: intWithDefault(env, 'GATEWAY_DEPOSIT_MIN_CONFIRMATIONS', 1),
-    depositTtlSeconds: intWithDefault(env, 'GATEWAY_DEPOSIT_TTL_SECONDS', 86_400),
-    assetInvoiceMinMsat: intWithDefault(env, 'GATEWAY_ASSET_INVOICE_MIN_MSAT', 3_000_000),
     rgbTransportAllowlist: [rgbProxyUrl, ...extraTransports.filter((e) => e !== rgbProxyUrl)],
-    depositsIntervalMs: intWithDefault(env, 'GATEWAY_DEPOSITS_INTERVAL_MS', 10_000),
     completionsIntervalMs: intWithDefault(env, 'GATEWAY_COMPLETIONS_INTERVAL_MS', 30_000),
     completionsMaxAttempts: intWithDefault(env, 'GATEWAY_COMPLETIONS_MAX_ATTEMPTS', 5),
-    reconcilerIntervalMs: intWithDefault(env, 'GATEWAY_RECONCILER_INTERVAL_MS', 10_000),
-    reconcilerGraceSeconds: intWithDefault(env, 'GATEWAY_RECONCILER_GRACE_SECONDS', 600),
     queueGlobalConcurrency: intWithDefault(env, 'GATEWAY_QUEUE_GLOBAL_CONCURRENCY', 4),
     queuePerUserDepth: intWithDefault(env, 'GATEWAY_QUEUE_PER_USER_DEPTH', 16),
   };

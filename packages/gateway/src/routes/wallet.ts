@@ -12,6 +12,7 @@ import {
   walletBalancesRouteSchema,
   walletReceiveRouteSchema,
   walletSyncRouteSchema,
+  walletTransactionsRouteSchema,
   walletTransfersRouteSchema,
   walletUnspentsRouteSchema,
 } from '../schemas/wallet.js';
@@ -54,6 +55,18 @@ export function registerWalletRoutes(app: FastifyInstance): void {
       transfers: await app.wallets.listTransfers(userId, assetId),
     }));
   });
+
+  app.get(
+    '/v1/wallet/transactions',
+    { schema: walletTransactionsRouteSchema, ...auth },
+    (request) => {
+      const userId = request.userId as string;
+      const { txid } = request.query as { txid?: string };
+      return app.queues.enqueue(userId, async () => ({
+        transactions: await app.wallets.listTransactions(userId, txid),
+      }));
+    },
+  );
 
   app.post(
     '/v1/wallet/receive',

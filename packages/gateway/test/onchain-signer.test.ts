@@ -14,7 +14,12 @@ import type { HDKey } from '@scure/bip32';
 import { base64, hex } from '@scure/base';
 import { p2tr, Transaction } from '@scure/btc-signer';
 import { WalletBackendError } from '../src/wallets/backend.js';
-import { masterFromMnemonic, signPsbtWithMaster, PSBT_PARSE_OPTIONS } from './fixture-signer.js';
+import {
+  masterFromMnemonic,
+  regtestXpubsFromMnemonic,
+  signPsbtWithMaster,
+  PSBT_PARSE_OPTIONS,
+} from './fixture-signer.js';
 import { createTestUser, testServer, type TestUser } from './helpers.js';
 import { MockWalletBackend } from './wallet-mocks.js';
 
@@ -77,6 +82,12 @@ function buildUnsignedPsbt(recipientScriptHex: string, amountSat: bigint): strin
 function signPsbt(psbtBase64: string): string {
   return signPsbtWithMaster(master, psbtBase64);
 }
+
+it('derives the rgb-lib fixture xpubs from the fixture mnemonic', () => {
+  // The regtest suites register wallets on rgb-node-api with these helpers, so
+  // they must reproduce what rgb-lib's restore_keys produced for the fixture.
+  expect(regtestXpubsFromMnemonic(FIXTURE_MNEMONIC)).toEqual(XPUBS);
+});
 
 describe('prepare→sign→complete round-trip with a fixture signer', () => {
   let app: FastifyInstance;

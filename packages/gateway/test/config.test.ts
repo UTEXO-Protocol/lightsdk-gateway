@@ -5,20 +5,21 @@ import { testEnv } from './helpers.js';
 describe('loadConfig', () => {
   it('loads a full config with defaults applied', () => {
     const config = loadConfig(testEnv());
-    expect(config.rlnUrl).toBe('http://127.0.0.1:3001');
+    expect(config.walletServiceUrl).toBe('http://127.0.0.1:34000');
     expect(config.host).toBe('127.0.0.1');
     expect(config.queueGlobalConcurrency).toBe(4);
     expect(config.queuePerUserDepth).toBe(16);
-    expect(config.floatCapPerUserMsat).toBe(1_000_000_000);
-    expect(config.floatCapGlobalMsat).toBe(10_000_000_000);
   });
 
   it('parses numeric overrides', () => {
     const config = loadConfig(
-      testEnv({ GATEWAY_QUEUE_GLOBAL_CONCURRENCY: '2', GATEWAY_FLOAT_CAP_PER_USER_MSAT: '5000' }),
+      testEnv({
+        GATEWAY_QUEUE_GLOBAL_CONCURRENCY: '2',
+        GATEWAY_WALLET_SERVICE_TIMEOUT_MS: '5000',
+      }),
     );
     expect(config.queueGlobalConcurrency).toBe(2);
-    expect(config.floatCapPerUserMsat).toBe(5000);
+    expect(config.walletServiceTimeoutMs).toBe(5000);
   });
 
   it('defaults the RGB transport allowlist to the configured proxy only', () => {
@@ -41,10 +42,11 @@ describe('loadConfig', () => {
     ]);
   });
 
-  it('rejects a missing RLN URL', () => {
+  it('rejects a missing or invalid rgb-node-api URL', () => {
     const env = testEnv();
-    delete (env as Record<string, string | undefined>)['RLN_URL'];
+    delete (env as Record<string, string | undefined>)['RGB_NODE_API_URL'];
     expect(() => loadConfig(env)).toThrow(ConfigError);
+    expect(() => loadConfig(testEnv({ RGB_NODE_API_URL: 'localhost 34000' }))).toThrow(ConfigError);
   });
 
   it('rejects an invalid URL', () => {
@@ -62,7 +64,7 @@ describe('loadConfig', () => {
 
   it('loads wallet settings with defaults', () => {
     const config = loadConfig(testEnv());
-    expect(config.walletIndexerUrl).toBe('127.0.0.1:50001');
+    expect(config.walletServiceTimeoutMs).toBe(60_000);
     expect(config.bitcoinNetwork).toBe('Regtest');
     expect(config.walletMaxOpen).toBe(32);
     expect(config.onchainOpTtlSeconds).toBe(600);
@@ -75,25 +77,11 @@ describe('loadConfig', () => {
     expect(() => loadConfig(testEnv({ GATEWAY_ONCHAIN_OP_TTL_SECONDS: '0' }))).toThrow(ConfigError);
   });
 
-  it('requires the wallets directory and indexer URL', () => {
-    for (const name of ['GATEWAY_WALLETS_DIR', 'GATEWAY_WALLET_INDEXER_URL']) {
-      const env = testEnv();
-      delete (env as Record<string, string | undefined>)[name];
-      expect(() => loadConfig(env)).toThrow(ConfigError);
-    }
-  });
-
   it('validates the bitcoin network name', () => {
     expect(loadConfig(testEnv({ GATEWAY_BITCOIN_NETWORK: 'signet' })).bitcoinNetwork).toBe(
       'Signet',
     );
     expect(() => loadConfig(testEnv({ GATEWAY_BITCOIN_NETWORK: 'litecoin' }))).toThrow(ConfigError);
-  });
-
-  it('allows an empty RLN admin token (localhost --disable-authentication mode)', () => {
-    const env = testEnv();
-    delete (env as Record<string, string | undefined>)['RLN_ADMIN_TOKEN'];
-    expect(loadConfig(env).rlnAdminToken).toBe('');
   });
 
   it('accepts every rgb-lib network, including the two signet variants', () => {

@@ -1,7 +1,7 @@
 /**
  * Per-user FIFO queue with a global concurrency cap (Block 3 item 1).
  *
- * Every downstream operation (RLN call, wallet-service call) is funneled
+ * Every downstream operation (wallet-service call) is funneled
  * through enqueue(userId, fn). Guarantees:
  *  - per user: tasks run one at a time, strictly in enqueue order;
  *  - globally: at most `globalConcurrency` tasks run at once, granted in

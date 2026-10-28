@@ -1,32 +1,21 @@
 /**
- * Integration test against the repo's regtest stack (Preflight B bring-up):
- * requires bitcoind + electrs on 127.0.0.1:50001. Run with:
+ * Integration test against the repo's regtest stack (bitcoind, electrs,
+ * esplora, RGB proxy and rgb-node-api). Run with:
  *
- *   ESPLORA=1 ./regtest.sh start          # from $RLN_REPO (rgb-lightning-node)
- *   WALLET_REGTEST=1 pnpm --filter @utexo/rln-gateway test wallet-integration
+ *   ./regtest/regtest.sh start            # from the repository root
+ *   WALLET_REGTEST=1 pnpm --filter @utexo/lightsdk-gateway test wallet-integration
  *
  * Skipped (not failed) when WALLET_REGTEST is unset so the default unit-test
  * command needs no infrastructure.
  */
-import { execSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { restoreKeysForTests } from '../src/wallets/rgblib.js';
+import { regtestXpubsFromMnemonic } from './fixture-signer.js';
 import { createTestUser, sleep, testServer, type TestUser } from './helpers.js';
-
-// regtest.sh lives in an rgb-lightning-node checkout: RLN_REPO, defaulting to
-// a sibling of this repository.
-const RLN_REPO =
-  process.env['RLN_REPO'] ??
-  fileURLToPath(new URL('../../../../rgb-lightning-node', import.meta.url));
-const ELECTRUM_URL = '127.0.0.1:50001';
+import { REGTEST_CONFIG, regtest } from './regtest.js';
 
 // TEST fixture only: mnemonics are never a gateway input (I1/I2). The client
-// SDK (Task 6) must reproduce these xpubs and this first address exactly.
+// SDK must reproduce these xpubs and this first address exactly.
 const FIXTURE_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 const FIXTURE_FIRST_ADDRESS = 'bcrt1p8wpt9v4frpf3tkn0srd97pksgsxc5hs52lafxwru9kgeephvs7rqjeprhg';
@@ -34,21 +23,13 @@ const FIXTURE_FIRST_ADDRESS = 'bcrt1p8wpt9v4frpf3tkn0srd97pksgsxc5hs52lafxwru9kg
 const FUND_BTC = 0.5;
 const FUND_SAT = 50_000_000;
 
-function regtest(command: string): string {
-  return execSync(`./regtest.sh ${command}`, { cwd: RLN_REPO, encoding: 'utf8' }).trim();
-}
-
 describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest', () => {
   let app: FastifyInstance;
   let user: TestUser;
+  let fundingTxid: string;
 
   beforeAll(async () => {
-    app = await testServer({
-      configOverrides: {
-        walletsDir: mkdtempSync(join(tmpdir(), 'utexo-gateway-it-')),
-        walletIndexerUrl: ELECTRUM_URL,
-      },
-    });
+    app = await testServer({ configOverrides: REGTEST_CONFIG });
     user = await createTestUser(app);
   });
 
@@ -61,12 +42,11 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest
   }
 
   it('registers fixture xpubs and derives the expected first address', async () => {
-    const xpubs = restoreKeysForTests('Regtest', FIXTURE_MNEMONIC);
     const response = await app.inject({
       method: 'POST',
       url: '/v1/wallet/xpubs',
       headers: authed(),
-      payload: { vanilla: xpubs.vanilla, colored: xpubs.colored, fingerprint: xpubs.fingerprint },
+      payload: regtestXpubsFromMnemonic(FIXTURE_MNEMONIC),
     });
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual({
@@ -80,7 +60,7 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest
       await app.inject({ method: 'GET', url: '/v1/wallet/balances', headers: authed() })
     ).json() as { btc: { vanilla: { settled: number } } };
 
-    regtest(`sendtoaddress ${FIXTURE_FIRST_ADDRESS} ${FUND_BTC}`);
+    fundingTxid = regtest(`sendtoaddress ${FIXTURE_FIRST_ADDRESS} ${FUND_BTC}`);
     regtest('mine 1');
 
     let settled = before.btc.vanilla.settled;
@@ -107,9 +87,39 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest
     expect(unspents.unspents.some((u) => u.amountSat === FUND_SAT)).toBe(true);
   }, 120_000);
 
+  it('lists the funding as a confirmed incoming transaction, also by txid', async () => {
+    const all = await app.inject({
+      method: 'GET',
+      url: '/v1/wallet/transactions',
+      headers: authed(),
+    });
+    expect(all.statusCode).toBe(200);
+    const byTxid = await app.inject({
+      method: 'GET',
+      url: `/v1/wallet/transactions?txid=${fundingTxid}`,
+      headers: authed(),
+    });
+    expect(byTxid.statusCode).toBe(200);
+    const { transactions } = byTxid.json() as {
+      transactions: { confirmationTime: { height: number } | null }[];
+    };
+    expect(transactions).toEqual([
+      expect.objectContaining({
+        transactionType: 'Incoming',
+        txid: fundingTxid,
+        receivedSat: FUND_SAT,
+        sentSat: 0,
+      }),
+    ]);
+    expect(transactions[0]?.confirmationTime?.height).toBeGreaterThan(0);
+    expect((all.json() as { transactions: unknown[] }).transactions).toContainEqual(
+      transactions[0],
+    );
+  }, 60_000);
+
   it('maps a real rgb-lib insufficient-allocation failure to a clean 400', async () => {
-    // No colored utxos were created (that needs client signing — Task 5), so a
-    // receive must fail with the sanitized INSUFFICIENT_FUNDS error, not a 500.
+    // No colored utxos were created (that needs client signing), so a receive
+    // must fail with the sanitized INSUFFICIENT_FUNDS error, not a 500.
     const response = await app.inject({
       method: 'POST',
       url: '/v1/wallet/receive',
@@ -118,7 +128,7 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe('INSUFFICIENT_FUNDS');
-    expect(response.body).not.toContain('RgbLib');
+    expect(response.body).not.toContain('Insufficient');
   }, 60_000);
 
   it('lists transfers (empty but well-formed) on the fresh wallet', async () => {
@@ -129,5 +139,31 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('wallet service on regtest
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ transfers: [] });
+  }, 60_000);
+
+  it('creates a witness receive without colorable UTXOs', async () => {
+    // Unlike a blind receive, the sender's transaction creates the output, so
+    // the same fresh wallet that cannot blind-receive can witness-receive.
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/wallet/receive',
+      headers: authed(),
+      payload: { mode: 'witness' },
+    });
+    expect(response.statusCode).toBe(201);
+    const receive = response.json() as { recipientId: string; mode: string };
+    expect(receive.mode).toBe('witness');
+    expect(receive.recipientId).toMatch(/^bcrt:wvout:/);
+
+    // Created without an asset, so it has none yet: rgb-node-api lists
+    // transfers by asset only, and the receive stays out of the list until the
+    // sender's transfer gives it one.
+    const listed = await app.inject({
+      method: 'GET',
+      url: '/v1/wallet/transfers',
+      headers: authed(),
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual({ transfers: [] });
   }, 60_000);
 });

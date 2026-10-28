@@ -5,8 +5,8 @@
  *
  * Every prepare records a pending operation with a TTL so an unsigned PSBT
  * expires, and returns a machine-readable intent summary built from the
- * gateway's OWN inputs (request fields + config) — never echoed from RLN or
- * parsed back out of the PSBT — for the client's verify-before-sign checks.
+ * gateway's OWN inputs (request fields + config) — never echoed from the
+ * wallet service or parsed back out of the PSBT — for the client's verify-before-sign checks.
  */
 import { randomUUID } from 'node:crypto';
 import { base64, hex } from '@scure/base';
@@ -14,7 +14,7 @@ import { Address, OutScript, Transaction } from '@scure/btc-signer';
 import type { GatewayConfig } from '../config.js';
 import type { GatewayDb } from '../db.js';
 import { HttpError } from '../errors.js';
-import { recordOwnership } from '../rln/scoping.js';
+import { recordOwnership } from '../scoping.js';
 import {
   WalletBackendError,
   walletHttpError,
@@ -184,9 +184,7 @@ export function txidFromPsbt(psbtBase64: string): string | null {
  * `commit`; rgb-lib `wallet/online.rs:89-118,315-322,3750-3754`,
  * `wallet/singlesig.rs:716-726,1103-1113`). Every one of those post-broadcast
  * failure points surfaces as an unclassified `Database`/`IO`/`Internal`
- * error for a transaction that is already on the network — the same hazard
- * the LN withdraw path handles by refusing to treat a 5xx as a rejection.
- * Calling those PSBT_REJECTED would tell the user their signature was bad
+ * error for a transaction that is already on the network. Calling those PSBT_REJECTED would tell the user their signature was bad
  * about money that actually moved, cache that 400 under their idempotency key
  * (4xx is not retryable in `idempotency.onSend`), and leave no server-side
  * trace, since the central handler logs only 5xx-or-caused errors.
@@ -360,8 +358,8 @@ export class OnchainService {
    * `complete` — a timeout, a crash, or the 502 COMPLETE_AMBIGUOUS that rgb-lib's
    * broadcast-before-bookkeeping ordering makes possible.
    *
-   * A pure SQLite read: no wallet FFI and no RLN call, so it deliberately does
-   * NOT go through the per-user queue (see `routes/onchain.ts`).
+   * A pure SQLite read: no wallet call, so it deliberately does NOT go
+   * through the per-user queue (see `routes/onchain.ts`).
    *
    * Expiry is derived, not written: a read must not mutate, and reporting the
    * stored 'pending' for an op already past its TTL would contradict what a
@@ -452,6 +450,8 @@ export class OnchainService {
             cause: error,
           });
         }
+        // No such route on the wallet service: nothing was attempted.
+        if (error.unsupported) throw walletHttpError(error);
         if (error.clientError || PSBT_REJECTION_VARIANTS.test(error.detail)) {
           throw new HttpError(
             400,

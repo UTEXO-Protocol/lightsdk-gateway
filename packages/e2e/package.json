@@ -1,5 +1,5 @@
 {
-  "name": "@utexo/rln-gateway-e2e",
+  "name": "@utexo/lightsdk-gateway-e2e",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@utexo/lightweight-client-sdk": "workspace:*",
-    "@utexo/rln-gateway": "workspace:*"
+    "@utexo/lightsdk-gateway": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",
