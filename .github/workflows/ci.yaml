@@ -11,9 +11,10 @@ name: CI
 # on that contract, and they need nothing but Node.
 #
 # Deliberately NOT here: the regtest e2e journey (`pnpm e2e`) and the two
-# WALLET_REGTEST gateway suites, which need bitcoind, electrs and an RLN
-# instance from an rgb-lightning-node checkout. They stay a local/manual step,
-# as documented in README.md.
+# WALLET_REGTEST gateway suites, which need the docker regtest stack in
+# regtest/ — including an rgb-node-api image built with access to private
+# UTEXO-Protocol repositories. They stay a local/manual step, as documented in
+# README.md.
 
 on:
   push:

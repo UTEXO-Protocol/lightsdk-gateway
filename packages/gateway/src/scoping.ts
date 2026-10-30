@@ -1,14 +1,13 @@
 /**
- * User↔resource scoping over the shared single-tenant RLN node.
+ * User↔resource ownership records (invariant I3: one user must never see
+ * another user's resources).
  *
- * RLN has no notion of users: every invoice, payment and transfer it reports
- * is node-wide. The gateway records ownership in resource_map at creation time
- * and every RLN list/get response MUST pass through these filters before
- * leaving the gateway (invariant I3: one user must never see another user's
- * resources). Never proxy an RLN response raw.
+ * The gateway records ownership in resource_map at creation time — the
+ * recipient id of every receive and the txid of every asset send — so any
+ * listing that is not already per-user can be filtered before it leaves the
+ * gateway.
  */
-import type { GatewayDb } from '../db.js';
-import type { Payment, Transfer } from './types.js';
+import type { GatewayDb } from './db.js';
 
 export type ResourceKind = 'invoice' | 'payment_hash' | 'asset_transfer' | 'swap';
 
@@ -94,36 +93,4 @@ export function filterOwned<T>(
     if (id === null || id === undefined || id === '') return false;
     return kindsOf(item).some((kind) => statement.get(kind, id, userId) !== undefined);
   });
-}
-
-/**
- * Scope an RLN payment list to one user. Ownership is matched per DIRECTION,
- * never as a union over kinds: an outbound send is claimed under
- * 'payment_hash' (LnFlows.pay), an inbound one under 'invoice'
- * (LnFlows.createInvoice). Accepting either kind for either direction would
- * break invariant I3 — RLN's /decodelninvoice only checks the BOLT11
- * self-signature, so any user can claim any hash under 'payment_hash' and
- * would then be handed the INBOUND payment another user owns under it.
- */
-export function scopePayments(db: GatewayDb, userId: string, payments: readonly Payment[]) {
-  return filterOwned(
-    db,
-    userId,
-    (payment: Payment) => (payment.payment_type === 'Outbound' ? ['payment_hash'] : ['invoice']),
-    payments,
-    (p) => p.payment_hash,
-  );
-}
-
-/**
- * Scope an RLN transfer list to one user. Receives are matched by the
- * recipient_id issued at invoice time; sends by txid recorded at send time.
- */
-export function scopeTransfers(db: GatewayDb, userId: string, transfers: readonly Transfer[]) {
-  const statement = db.prepare(
-    "SELECT 1 FROM resource_map WHERE kind = 'asset_transfer' AND resource_id = ? AND user_id = ?",
-  );
-  const isOwned = (id: string | null | undefined): boolean =>
-    id !== null && id !== undefined && id !== '' && statement.get(id, userId) !== undefined;
-  return transfers.filter((t) => isOwned(t.recipient_id) || isOwned(t.txid));
 }

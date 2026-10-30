@@ -3,8 +3,9 @@
  *
  * The gateway never holds user key material (invariant I2): a wallet is
  * constructed from the account xpubs registered by the client and can prepare
- * but never sign. The production implementation (./rgblib.ts) drives the
- * native rgb-lib binding; unit tests substitute a mock.
+ * but never sign. The production implementation (./rgbnodeapi.ts) calls a
+ * private rgb-node-api service that hosts the wallets; unit tests substitute a
+ * mock.
  */
 import { HttpError } from '../errors.js';
 
@@ -94,14 +95,36 @@ export interface WalletTransfer {
   updatedAt: number;
 }
 
+/** When a transaction confirmed (rgb-lib BlockTime). */
+export interface WalletBlockTime {
+  height: number;
+  /** Unix seconds of the confirming block. */
+  timestamp: number;
+}
+
+/** An on-chain transaction of the wallet (rgb-lib Transaction). */
+export interface WalletTransaction {
+  /** rgb-lib TransactionType verbatim: RgbSend, Drain, CreateUtxos, SendBtc, Incoming. */
+  transactionType: string;
+  txid: string;
+  receivedSat: number;
+  sentSat: number;
+  feeSat: number;
+  /** Null while unconfirmed. */
+  confirmationTime: WalletBlockTime | null;
+}
+
 export interface ReceiveRequest {
   mode: 'blind' | 'witness';
   /** null = asset-agnostic invoice. */
   assetId: string | null;
   /** null = amount-less invoice (rgb-lib Assignment "Any"). */
   amount: number | null;
-  expirationTimestamp: number;
-  transportEndpoints: string[];
+  /**
+   * Seconds until the invoice expires. rgb-node-api takes a duration and names
+   * the transport endpoint itself (its configured RGB proxy).
+   */
+  durationSeconds: number;
   minConfirmations: number;
 }
 
@@ -150,7 +173,9 @@ export interface WalletHandle {
   getBtcBalance(): Promise<WalletBtcBalance>;
   listAssets(): Promise<WalletAsset[]>;
   listUnspents(): Promise<WalletUnspent[]>;
-  listTransfers(assetId: string | null): Promise<WalletTransfer[]>;
+  listTransfers(assetId: string): Promise<WalletTransfer[]>;
+  /** On-chain transactions, after a sync against the shared indexer. */
+  listTransactions(): Promise<WalletTransaction[]>;
   receive(request: ReceiveRequest): Promise<ReceiveData>;
   /** Prepare an unsigned BTC-send PSBT (client signs externally). */
   sendBtcBegin(address: string, amountSat: number, feeRateSatPerVb: number): Promise<string>;
@@ -170,10 +195,8 @@ export interface WalletHandle {
   createUtxosBegin(params: CreateUtxosParams): Promise<string>;
   /** Broadcast a signed create-utxos PSBT; returns how many UTXOs were created. */
   createUtxosEnd(signedPsbt: string): Promise<number>;
-  /** RGB-side refresh: advances pending transfers. */
+  /** BTC-side sync against the shared indexer, then RGB refresh of pending transfers. */
   refresh(): Promise<void>;
-  /** BTC-side sync against the shared indexer. */
-  sync(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -197,9 +220,15 @@ export class WalletBackendError extends Error {
      * rgb-lib returned a value this API cannot carry losslessly — in practice a
      * u64 asset amount above 2^53-1, which `JSON.parse` has already rounded.
      * Nobody's request is at fault and no retry helps; it is reported rather
-     * than rounded (see `safeInteger` in ./rgblib.ts).
+     * than rounded (see `safeInteger` in ./rgbnodeapi.ts).
      */
     readonly unrepresentable: boolean = false,
+    /**
+     * The wallet service does not implement this operation at all (the
+     * rgb-node-api route does not exist). Nothing was attempted, so nothing
+     * can have been broadcast.
+     */
+    readonly unsupported: boolean = false,
   ) {
     super(message);
     this.name = 'WalletBackendError';
@@ -222,6 +251,16 @@ export class WalletBackendError extends Error {
  */
 export function walletHttpError(error: unknown): unknown {
   if (!(error instanceof WalletBackendError)) return error;
+  if (error.unsupported) {
+    // A deployment gap, not the caller's fault: the configured rgb-node-api
+    // has no route for this operation.
+    return new HttpError(
+      501,
+      'WALLET_OPERATION_UNSUPPORTED',
+      'this wallet operation is not available on the configured wallet service',
+      { cause: error },
+    );
+  }
   if (error.unrepresentable) {
     // 502 like DEPOSIT_ADDRESS_CONFLICT: an upstream-shaped, permanent problem
     // that no client request can fix. It is deliberately NOT a 4xx — the caller

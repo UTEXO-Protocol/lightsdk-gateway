@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { OPERATOR_TOKEN, RLN_ADMIN_TOKEN, createTestUser, testServer } from './helpers.js';
-import { fakeRln, rlnTimeout } from './ln-mocks.js';
-import { BTC_ASSET } from '../src/ledger.js';
+import { WalletBackendError } from '../src/wallets/backend.js';
+import { OPERATOR_TOKEN, createTestUser, testServer } from './helpers.js';
+import { MockWalletBackend } from './wallet-mocks.js';
+
+const XPUBS = {
+  vanilla:
+    'tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX',
+  colored:
+    'tpubDCtpoJs6YJcjLnr9gq6jYriYNMuWEu8mSDvEQU5st3ZkJbFqqzwpHUiPvxqD2366ciFAfpehk1k2d7Tyk7AJEr8uZva7KfnX4RpsiVSoEcZ',
+  fingerprint: '73c5da0a',
+};
 
 let app: FastifyInstance;
 
@@ -11,7 +19,7 @@ afterEach(async () => {
 });
 
 describe('invariant I4: credentials never reach the logs', () => {
-  it('user tokens, the operator token and the RLN admin token are absent from log output', async () => {
+  it('user tokens and the operator token are absent from log output', async () => {
     const chunks: string[] = [];
     app = await testServer({
       loggerStream: { write: (msg: string) => void chunks.push(msg) },
@@ -33,7 +41,6 @@ describe('invariant I4: credentials never reach the logs', () => {
     expect(logs).not.toContain(user.token);
     expect(logs).not.toContain(OPERATOR_TOKEN);
     expect(logs).not.toContain('wrong-operator-token-123');
-    expect(logs).not.toContain(RLN_ADMIN_TOKEN);
     // The user id is fine to log; the token hash is not stored in logs either.
     const row = app.db.prepare('SELECT token_hash FROM users WHERE id = ?').get(user.userId) as {
       token_hash: string;
@@ -43,41 +50,44 @@ describe('invariant I4: credentials never reach the logs', () => {
 });
 
 describe('failed money-moving calls leave an operator-readable record', () => {
-  it('logs the upstream cause behind an opaque client error', async () => {
+  it('logs the wallet-service cause behind an opaque client error', async () => {
     const chunks: string[] = [];
+    const backend = new MockWalletBackend();
     app = await testServer({
+      walletBackend: backend,
       loggerStream: { write: (msg: string) => void chunks.push(msg) },
-      rlnClient: fakeRln({
-        sendBtc: () => {
-          throw rlnTimeout();
-        },
-      }),
     });
     const user = await createTestUser(app);
-    app.ledger.credit({
-      userId: user.userId,
-      asset: BTC_ASSET,
-      amount: 1_000_000,
-      kind: 'deposit',
-      ref: 'd1',
-    });
+    const headers = { authorization: `Bearer ${user.token}` };
+    await app.inject({ method: 'POST', url: '/v1/wallet/xpubs', headers, payload: XPUBS });
+    const handle = backend.handleFor(user.userId);
+    if (handle === undefined) throw new Error('no handle');
+    // An rgb-node-api without the route answers a bare 404.
+    handle.failWith = new WalletBackendError(
+      'wallet sendBtcBegin failed',
+      'rgb-node-api /wallet/sendbtcbegin -> 404 (no such route)',
+      false,
+      false,
+      false,
+      true,
+    );
     const response = await app.inject({
       method: 'POST',
-      url: '/v1/ln/withdraw',
-      headers: { authorization: `Bearer ${user.token}`, 'idempotency-key': 'w-1' },
-      payload: { kind: 'btc', address: 'bcrt1qvaultaddr000000', amountSat: 300 },
+      url: '/v1/onchain/send-btc/prepare',
+      headers: { ...headers, 'idempotency-key': 'p-1' },
+      payload: {
+        address: 'bcrt1p8wpt9v4frpf3tkn0srd97pksgsxc5hs52lafxwru9kgeephvs7rqjeprhg',
+        amountSat: 1000,
+      },
     });
-    // The client learns nothing about the node...
-    expect(response.statusCode).toBe(504);
-    expect(JSON.stringify(response.json())).not.toContain('/sendbtc');
-    // ...but the withdrawal is left 'ambiguous', so the operator must be able
-    // to see what RLN actually said.
-    const withdrawal = app.db.prepare('SELECT state FROM withdrawals').get() as { state: string };
-    expect(withdrawal.state).toBe('ambiguous');
+    // The client learns nothing about the wallet service...
+    expect(response.statusCode).toBe(501);
+    expect(response.json().error.code).toBe('WALLET_OPERATION_UNSUPPORTED');
+    expect(response.body).not.toContain('/wallet/sendbtcbegin');
+    // ...but the operator can see which route the deployment is missing.
     const logs = chunks.join('');
-    expect(logs).toContain('RlnTimeoutError');
-    expect(logs).toContain('UPSTREAM_TIMEOUT');
-    expect(logs).not.toContain(RLN_ADMIN_TOKEN);
+    expect(logs).toContain('rgb-node-api /wallet/sendbtcbegin -> 404 (no such route)');
+    expect(logs).toContain('WALLET_OPERATION_UNSUPPORTED');
     expect(logs).not.toContain(user.token);
   });
 });

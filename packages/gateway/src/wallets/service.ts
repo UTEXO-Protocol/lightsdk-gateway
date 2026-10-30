@@ -1,12 +1,12 @@
 /**
  * Per-user watch-only wallet service: xpub registration, wallet reads and
  * receive-invoice creation. Balances, unspents and transfers come from the
- * USER's wallet, never from the shared RLN node.
+ * USER's own wallet on rgb-node-api, never from a shared one.
  */
 import type { GatewayConfig } from '../config.js';
 import type { GatewayDb } from '../db.js';
 import { HttpError } from '../errors.js';
-import { recordOwnership } from '../rln/scoping.js';
+import { recordOwnership } from '../scoping.js';
 import {
   attributeVanillaAddress,
   ATTRIBUTION_WINDOW,
@@ -21,6 +21,7 @@ import {
   type WalletBtcBalance,
   type WalletHandle,
   type WalletIdentity,
+  type WalletTransaction,
   type WalletTransfer,
   type WalletUnspent,
 } from './backend.js';
@@ -96,6 +97,10 @@ export class WalletService {
    * Register a user's account xpubs. Registration is permanent: re-registering
    * identical values is an idempotent success, anything else is a conflict
    * (a different fingerprint means a different master key — never allowed).
+   *
+   * A master fingerprint also belongs to at most one user. rgb-node-api keys
+   * the wallets it has loaded by fingerprint alone, so a second user with the
+   * same fingerprint would be served from the first user's wallet (I3).
    */
   async registerXpubs(
     userId: string,
@@ -120,25 +125,10 @@ export class WalletService {
         'different xpubs are already registered for this user',
       );
     }
-    // Smoke-open before persisting so malformed xpubs are rejected up front.
-    let address: string;
-    try {
-      address = await this.pool.withWallet({ userId, xpubs }, (wallet) => wallet.getAddress());
-    } catch (error) {
-      // Only a rejection rgb-lib pinned on the REQUEST may be answered 400.
-      // Everything else here — a missing rgb-lib native module, an unreachable
-      // indexer — is the deployment's fault, not the caller's, and blaming the
-      // xpubs sends an operator hunting for a client bug. Either way the cause
-      // must travel with the error: the central handler logs a 400 ONLY when it
-      // carries one, so dropping it left the single most common bring-up
-      // failure with no server-side trace at all.
-      if (error instanceof WalletBackendError && error.clientError) {
-        throw new HttpError(400, 'INVALID_XPUBS', 'wallet construction from these xpubs failed', {
-          cause: error,
-        });
-      }
-      throw error;
-    }
+    // Claim the fingerprint BEFORE the smoke call: that call loads the wallet
+    // on rgb-node-api, which would answer it from another user's wallet if the
+    // fingerprint were already taken. The UNIQUE index makes the claim atomic
+    // across concurrent registrations; it is released if the smoke call fails.
     try {
       this.db
         .prepare(
@@ -147,10 +137,38 @@ export class WalletService {
         )
         .run(userId, xpubs.vanilla, xpubs.colored, xpubs.fingerprint, now);
     } catch (error) {
-      // The smoke-open cached a wallet for xpubs that were never persisted; a
-      // retry with different xpubs must not be served from that stale handle.
-      this.pool.evict(userId);
+      if (error instanceof Error && error.message.includes('user_xpubs.fingerprint')) {
+        throw new HttpError(
+          409,
+          'FINGERPRINT_IN_USE',
+          'a wallet with this master fingerprint is already registered',
+        );
+      }
       throw error;
+    }
+    // Smoke call so malformed xpubs are rejected up front.
+    let address: string;
+    try {
+      address = await this.pool.withWallet({ userId, xpubs }, (wallet) => wallet.getAddress());
+    } catch (error) {
+      this.db.prepare('DELETE FROM user_xpubs WHERE user_id = ?').run(userId);
+      // The pool cached a handle for xpubs that are no longer registered; a
+      // retry with different xpubs must not be served from it, and closing it
+      // also unloads the wallet from rgb-node-api.
+      this.pool.evict(userId);
+      // Only a rejection rgb-lib pinned on the REQUEST may be answered 400.
+      // Everything else here — an unreachable rgb-node-api or indexer — is the
+      // deployment's fault, not the caller's, and blaming the xpubs sends an
+      // operator hunting for a client bug. Either way the cause must travel
+      // with the error: the central handler logs a 400 ONLY when it carries
+      // one, so dropping it left the single most common bring-up failure with
+      // no server-side trace at all.
+      if (error instanceof WalletBackendError && error.clientError) {
+        throw new HttpError(400, 'INVALID_XPUBS', 'wallet construction from these xpubs failed', {
+          cause: error,
+        });
+      }
+      throw walletHttpError(error);
     }
     return { created: true, address };
   }
@@ -197,21 +215,38 @@ export class WalletService {
   }
 
   /**
-   * All transfers across the user's assets, plus asset-less ones (pending
-   * receives created before an asset was known). With assetId given, only
-   * that asset's transfers.
+   * All transfers across the assets the user's wallet knows; with assetId
+   * given, only that asset's transfers.
+   *
+   * A receive created without an asset id has no asset until the sender's
+   * transfer arrives, and rgb-node-api can only list transfers by asset, so
+   * such a pending receive is not listed until then. The client already holds
+   * its recipient id and batch index from the receive response.
    */
   async listTransfers(userId: string, assetId?: string): Promise<WalletTransfer[]> {
     return this.run(this.identityOf(userId), async (wallet) => {
       if (assetId !== undefined) {
         return wallet.listTransfers(assetId);
       }
-      const transfers = await wallet.listTransfers(null);
+      const transfers: WalletTransfer[] = [];
       for (const asset of await wallet.listAssets()) {
         transfers.push(...(await wallet.listTransfers(asset.assetId)));
       }
       return transfers;
     });
+  }
+
+  /**
+   * On-chain transactions of the user's wallet, synced against the indexer
+   * first. With txid given, only that transaction — an empty list when the
+   * wallet has none by that id. rgb-node-api has no lookup by txid, so the
+   * filter runs here.
+   */
+  async listTransactions(userId: string, txid?: string): Promise<WalletTransaction[]> {
+    const transactions = await this.run(this.identityOf(userId), (wallet) =>
+      wallet.listTransactions(),
+    );
+    return txid === undefined ? transactions : transactions.filter((tx) => tx.txid === txid);
   }
 
   async receive(
@@ -220,20 +255,17 @@ export class WalletService {
     now: number = Date.now(),
   ): Promise<ReceiveResult> {
     const identity = this.identityOf(userId);
-    const expirationTimestamp =
-      Math.floor(now / 1000) + (params.durationSeconds ?? DEFAULT_RECEIVE_DURATION_SECONDS);
     const data = await this.run(identity, (wallet) =>
       wallet.receive({
         mode: params.mode,
         assetId: params.assetId ?? null,
         amount: params.amount ?? null,
-        expirationTimestamp,
-        transportEndpoints: [this.config.rgbProxyUrl],
+        durationSeconds: params.durationSeconds ?? DEFAULT_RECEIVE_DURATION_SECONDS,
         minConfirmations: params.minConfirmations ?? DEFAULT_MIN_CONFIRMATIONS,
       }),
     );
     // Scoping (I3): the recipient id attributes the future transfer to this
-    // user in every node-wide listing.
+    // user.
     recordOwnership(
       this.db,
       { kind: 'asset_transfer', resourceId: data.recipientId, userId, state: 'pending' },
@@ -244,9 +276,6 @@ export class WalletService {
 
   /** BTC-side sync plus RGB refresh, on the user's wallet. */
   async sync(userId: string): Promise<void> {
-    await this.run(this.identityOf(userId), async (wallet) => {
-      await wallet.sync();
-      await wallet.refresh();
-    });
+    await this.run(this.identityOf(userId), (wallet) => wallet.refresh());
   }
 }

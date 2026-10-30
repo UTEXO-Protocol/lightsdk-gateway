@@ -272,6 +272,66 @@ export const walletTransfersRouteSchema = {
   },
 } as const;
 
+/** A txid as rgb-lib reports it: 64 lowercase hex characters. */
+const txidPattern = '^[0-9a-f]{64}$';
+
+export const walletTransactionsRouteSchema = {
+  querystring: {
+    type: 'object',
+    properties: { txid: { type: 'string', pattern: txidPattern } },
+    additionalProperties: false,
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        transactions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              /**
+               * rgb-lib TransactionType verbatim (RgbSend, Drain, CreateUtxos,
+               * SendBtc, Incoming), so a variant added upstream arrives named.
+               */
+              transactionType: { type: 'string' },
+              txid: { type: 'string' },
+              receivedSat: { type: 'integer' },
+              sentSat: { type: 'integer' },
+              feeSat: { type: 'integer' },
+              /** Null while unconfirmed. */
+              confirmationTime: {
+                type: ['object', 'null'],
+                properties: {
+                  height: { type: 'integer' },
+                  timestamp: { type: 'integer' },
+                },
+                required: ['height', 'timestamp'],
+                additionalProperties: false,
+              },
+            },
+            required: [
+              'transactionType',
+              'txid',
+              'receivedSat',
+              'sentSat',
+              'feeSat',
+              'confirmationTime',
+            ],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['transactions'],
+      additionalProperties: false,
+    },
+    400: errorBodySchema,
+    401: errorBodySchema,
+    404: errorBodySchema,
+    502: errorBodySchema,
+  },
+} as const;
+
 export const walletReceiveRouteSchema = {
   body: {
     type: 'object',

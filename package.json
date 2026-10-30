@@ -1,5 +1,5 @@
 {
-  "name": "@utexo/rln-gateway-workspace",
+  "name": "@utexo/lightsdk-gateway-workspace",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.34.5",
@@ -9,14 +9,12 @@
   "scripts": {
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
-    "e2e": "pnpm -r run build && pnpm --filter @utexo/rln-gateway-e2e run e2e",
+    "e2e": "pnpm -r run build && pnpm --filter @utexo/lightsdk-gateway-e2e run e2e",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "@utexo/rgb-lib-darwin-arm64",
-      "@utexo/rgb-lib-linux-arm64",
       "@utexo/rgb-lib-linux-x64",
       "better-sqlite3"
     ]

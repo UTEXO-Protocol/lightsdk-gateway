@@ -1,8 +1,8 @@
 /**
  * Fee-estimate route and estimator.
  *
- * Clients cannot reach esplora — it sits behind the gateway with RLN and the RGB
- * proxy — so without this route a client either hardcodes a fee rate or sends
+ * Clients cannot reach esplora — it sits behind the gateway with rgb-node-api and
+ * the RGB proxy — so without this route a client either hardcodes a fee rate or sends
  * none and takes the gateway's 2 sat/vB default. Two roundings are deliberate
  * and tested here: up to a whole sat/vB (never below the estimate the caller
  * asked for), and down the esplora target ladder to the nearest published target

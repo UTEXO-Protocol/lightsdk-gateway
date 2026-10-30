@@ -1,9 +1,10 @@
 /**
  * Fee-rate estimates from the shared esplora instance.
  *
- * Clients cannot reach esplora (it sits behind the gateway with RLN and the RGB
- * proxy), so without this route a client has no fee source at all and either
- * hardcodes a rate or sends none and accepts the gateway's 2 sat/vB default.
+ * Clients cannot reach esplora (it sits behind the gateway with rgb-node-api
+ * and the RGB proxy), so without this route a client has no fee source at all
+ * and either hardcodes a rate or sends none and accepts the gateway's 2 sat/vB
+ * default.
  *
  * Two deliberate roundings. Esplora reports fractional sat/vB, while every
  * gateway fee input is an integer 1..1000 — so the answer is rounded UP, never

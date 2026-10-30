@@ -63,7 +63,7 @@ describe('WalletPool', () => {
     let firstDone = false;
     handle.gate = () => gate.promise;
     const first = pool.withWallet(identity('u1'), async (w) => {
-      await w.sync();
+      await w.refresh();
       firstDone = true;
     });
     const second = pool.withWallet(identity('u1'), async (w) => {
@@ -73,8 +73,7 @@ describe('WalletPool', () => {
     });
     gate.resolve();
     await Promise.all([first, second]);
-    expect(handle.syncCount).toBe(1);
-    expect(handle.refreshCount).toBe(1);
+    expect(handle.refreshCount).toBe(2);
   });
 
   it('does not interrupt an in-flight operation when evicting', async () => {
@@ -85,16 +84,16 @@ describe('WalletPool', () => {
 
     const gate = deferred<void>();
     handle.gate = () => gate.promise;
-    const slow = pool.withWallet(identity('u1'), (w) => w.sync());
-    // Trigger eviction of u1 while its sync is queued/running.
+    const slow = pool.withWallet(identity('u1'), (w) => w.refresh());
+    // Trigger eviction of u1 while its refresh is queued/running.
     const other = pool.withWallet(identity('u2'), (w) => w.getAddress());
     gate.resolve();
     await Promise.all([slow, other]);
-    // close must come after the in-flight sync on the operation log.
+    // close must come after the in-flight refresh on the operation log.
     const closeIndex = handle.operations.indexOf('close');
-    const syncIndex = handle.operations.indexOf('sync');
-    expect(closeIndex).toBeGreaterThan(syncIndex);
-    expect(handle.syncCount).toBe(1);
+    const refreshIndex = handle.operations.indexOf('refresh');
+    expect(closeIndex).toBeGreaterThan(refreshIndex);
+    expect(handle.refreshCount).toBe(1);
   });
 
   it('evict closes the cached wallet and forces a reopen', async () => {

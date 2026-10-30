@@ -127,6 +127,18 @@ export interface WalletTransfer {
   updatedAt: number;
 }
 
+/** An on-chain transaction of the user's wallet. */
+export interface WalletTransaction {
+  /** rgb-lib TransactionType verbatim: RgbSend, Drain, CreateUtxos, SendBtc, Incoming. */
+  transactionType: string;
+  txid: string;
+  receivedSat: number;
+  sentSat: number;
+  feeSat: number;
+  /** Null while unconfirmed. */
+  confirmationTime: { height: number; timestamp: number } | null;
+}
+
 export interface FeeEstimate {
   /** Confirmation target asked for. */
   blocks: number;
@@ -227,7 +239,7 @@ export class IntentMismatchError extends Error {
  * attacker script in the PSBT with the same attacker address in the intent and
  * both "match", while checks 1/3/4/5 stay clean (the output is accounted, so
  * change-own skips it). The design doc calls for the *user's* stated intent
- * (docs/design/lightweight-sdk-and-lightweight-rln.md, check 2), so every field the
+ * (docs/design/lightsdk-architecture.md, check 2), so every field the
  * caller actually stated is asserted here before the intent is handed on.
  *
  * Fields the caller left to the server (fee rate, transport endpoints, utxo
@@ -258,90 +270,6 @@ function checkedIntent(
 function checkPinned<T>(name: string, requested: T | undefined, returned: T): string | null {
   if (requested === undefined || requested === returned) return null;
   return `${name} ${String(returned)} != ${String(requested)}`;
-}
-
-export interface LnDepositPrepareParams {
-  kind: 'btc' | 'rgb';
-  /** Declared BTC deposit amount (cap check), required for kind 'btc'. */
-  amountMsat?: number;
-  assetId?: string;
-  amount?: number;
-}
-
-export interface LnDepositPrepareResult {
-  depositId: string;
-  kind: 'btc' | 'rgb';
-  /** Node-owned BTC target address (kind 'btc'). */
-  address: string | null;
-  /** RGB invoice to pay into the node (kind 'rgb'). */
-  invoice: string | null;
-  recipientId: string | null;
-}
-
-export interface LnPayParams {
-  invoice: string;
-  /** Required when the invoice carries no amount. */
-  amtMsat?: number;
-  assetAmount?: number;
-}
-
-export type LnPaymentStatus = 'pending' | 'succeeded' | 'failed';
-
-export interface LnPayResult {
-  paymentHash: string;
-  status: LnPaymentStatus;
-}
-
-export interface LnInvoiceCreateParams {
-  amtMsat?: number;
-  expirySec?: number;
-  assetId?: string;
-  assetAmount?: number;
-  description?: string;
-}
-
-export interface LnInvoiceInfo {
-  paymentHash: string;
-  invoice: string;
-  state: 'pending' | 'settled' | 'expired';
-  amtMsat: number | null;
-  assetId: string | null;
-  assetAmount: number | null;
-  createdAt: number;
-}
-
-export interface LnPaymentEntry {
-  paymentHash: string;
-  direction: 'inbound' | 'outbound';
-  status: LnPaymentStatus;
-  amtMsat: number | null;
-  assetId: string | null;
-  assetAmount: number | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface LnBalance {
-  btcMsat: number;
-  assets: Record<string, number>;
-}
-
-export interface LnWithdrawParams {
-  kind: 'btc' | 'rgb';
-  address?: string;
-  amountSat?: number;
-  assetId?: string;
-  amount?: number;
-  recipientId?: string;
-  /** Required when recipientId is a witness (`<chain>:wvout:…`) beneficiary. */
-  witnessAmountSat?: number;
-  transportEndpoints?: string[];
-  feeRateSatPerVb?: number;
-}
-
-export interface LnWithdrawResult {
-  withdrawalId: string;
-  txid: string;
 }
 
 /** RFC-4122 v4 id from crypto.getRandomValues; used for idempotency keys. */
@@ -489,6 +417,12 @@ export class GatewayClient {
     return this.request({ method: 'GET', path: `/v1/wallet/transfers${query}` });
   }
 
+  /** On-chain transactions, synced first; with txid, only that one (empty when unknown). */
+  getTransactions(txid?: string): Promise<{ transactions: WalletTransaction[] }> {
+    const query = txid === undefined ? '' : `?txid=${encodeURIComponent(txid)}`;
+    return this.request({ method: 'GET', path: `/v1/wallet/transactions${query}` });
+  }
+
   receive(params: ReceiveParams): Promise<ReceiveResult> {
     return this.request({ method: 'POST', path: '/v1/wallet/receive', body: params });
   }
@@ -627,43 +561,5 @@ export class GatewayClient {
       method: 'GET',
       path: `/v1/onchain/operations/${encodeURIComponent(opId)}`,
     });
-  }
-
-  /** Pin the idempotency key to retry a prepare without minting a second intent. */
-  prepareLnDeposit(
-    params: LnDepositPrepareParams,
-    idempotencyKey?: string,
-  ): Promise<LnDepositPrepareResult> {
-    return this.post('/v1/ln/deposit/prepare', params, idempotencyKey);
-  }
-
-  /** Money-moving: pin the idempotency key to retry the SAME payment safely. */
-  payLnInvoice(params: LnPayParams, idempotencyKey?: string): Promise<LnPayResult> {
-    return this.post('/v1/ln/pay', params, idempotencyKey);
-  }
-
-  createLnInvoice(
-    params: LnInvoiceCreateParams,
-  ): Promise<{ invoice: string; paymentHash: string }> {
-    return this.request({ method: 'POST', path: '/v1/ln/invoice', body: params });
-  }
-
-  getLnInvoice(paymentHash: string): Promise<LnInvoiceInfo> {
-    return this.request({
-      method: 'GET',
-      path: `/v1/ln/invoice/${encodeURIComponent(paymentHash)}`,
-    });
-  }
-
-  listLnPayments(): Promise<{ payments: LnPaymentEntry[] }> {
-    return this.request({ method: 'GET', path: '/v1/ln/payments' });
-  }
-
-  getLnBalance(): Promise<LnBalance> {
-    return this.request({ method: 'GET', path: '/v1/ln/balance' });
-  }
-
-  withdrawLn(params: LnWithdrawParams, idempotencyKey?: string): Promise<LnWithdrawResult> {
-    return this.post('/v1/ln/withdraw', params, idempotencyKey);
   }
 }

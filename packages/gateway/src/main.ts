@@ -1,7 +1,7 @@
 /**
  * Production entrypoint: load config from the environment, build the server
  * with background workers, listen, and shut down cleanly on SIGINT/SIGTERM.
- * Run with `node dist/main.js` (or `pnpm --filter @utexo/rln-gateway start`).
+ * Run with `node dist/main.js` (or `pnpm --filter @utexo/lightsdk-gateway start`).
  */
 import { loadConfig } from './config.js';
 import { buildServer } from './server.js';

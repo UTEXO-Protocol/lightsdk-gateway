@@ -1,38 +1,34 @@
-# @utexo/rln-gateway
+# @utexo/lightsdk-gateway
 
-TypeScript API gateway in front of ONE shared RLN instance. It owns per-user auth,
-per-user FIFO queues with a global concurrency cap, idempotency keys on money-moving
-routes, per-user **watch-only** rgb-lib wallets for PSBT preparation, a capped-float
-ledger for the custodial LN working balance, and the user↔resource scoping map. Every
-RLN list/get response is filtered through that map before leaving the gateway — RLN
-state is node-wide and is never proxied raw.
+TypeScript API gateway in front of a private
+[rgb-node-api](https://github.com/UTEXO-Protocol/rgb-node-api) service, which hosts one
+**watch-only** rgb-lib wallet per user. The gateway owns per-user auth, per-user FIFO
+queues with a global concurrency cap, idempotency keys on money-moving routes, the
+on-chain prepare → client-signs → complete flows with their intent summaries, and the
+user↔resource scoping map. rgb-node-api holds no keys and never signs; neither does the
+gateway.
 
-Design authority: `docs/design/lightweight-sdk-and-lightweight-rln.md` (repo root). Trust
-invariants: no secret ever reaches the gateway (I1), one watch-only wallet per user
-(I2), no cross-user visibility (I3), only the gateway holds the RLN credential (I4).
+Design authority: `docs/design/lightsdk-architecture.md` (repo root). Trust invariants: no secret ever reaches the gateway (I1), one watch-only wallet per user (I2),
+no cross-user visibility (I3), only the gateway can reach the wallet service (I4).
 
 ## Running
 
-Requirements: Node 20+, pnpm, and a platform with a published rgb-lib native module —
-`linux-x64`, `linux-arm64` or `darwin-arm64` (`src/wallets/rgblib.ts`). Elsewhere the
-gateway still starts, but every wallet operation fails at first use with
-`rgb-lib native module unavailable`.
+Requirements: Node 20+, pnpm, and an rgb-node-api instance reachable only from the
+gateway (see [rgb-node-api](#rgb-node-api) below for the routes and settings it needs).
 
 ```sh
-RLN_URL=http://127.0.0.1:3101 \
+RGB_NODE_API_URL=http://127.0.0.1:34000 \
 ESPLORA_URL=http://127.0.0.1:3002 \
 RGB_PROXY_URL=rpc://127.0.0.1:3000/json-rpc \
-GATEWAY_SQLITE_PATH=/var/lib/rln-gateway/gateway.sqlite \
-GATEWAY_WALLETS_DIR=/var/lib/rln-gateway/wallets \
-GATEWAY_WALLET_INDEXER_URL=127.0.0.1:50001 \
+GATEWAY_SQLITE_PATH=/var/lib/lightsdk-gateway/gateway.sqlite \
 GATEWAY_OPERATOR_TOKEN=<random, 16+ chars> \
-node dist/main.js   # or: pnpm --filter @utexo/rln-gateway start
+node dist/main.js   # or: pnpm --filter @utexo/lightsdk-gateway start
 ```
 
 The production entrypoint (`src/main.ts`) runs `loadConfig` → `buildServer` with the
-background workers (deposits watcher + payments reconciler) → `listen`. `buildServer`
-starts the workers only when called with `startWorkers: true` — `main.ts` does this; a
-library embedding must opt in explicitly.
+background completions worker → `listen`. `buildServer` starts the worker only when
+called with `startWorkers: true` — `main.ts` does this; a library embedding must opt in
+explicitly.
 
 Users are created by the operator via `POST /v1/users` (guarded by the operator token);
 the response contains the user's opaque bearer token exactly once — only its hash is
@@ -50,10 +46,9 @@ Two details matter for retries. Responses with status ≥ 500 or 429 are deliber
 **not** cached — the claim is released so the request can be retried — and an in-flight
 claim whose request never stored a response is reclaimable after 15 minutes, but only by
 a retry of the _same_ request (a different body under that key is always 409
-`IDEMPOTENCY_KEY_REUSED`). After a 5xx on `/v1/ln/pay` or `/v1/ln/withdraw` the retry is
-therefore answered by the flow's own replay guard rather than by a cached body: the
-gateway reports the recorded state instead of sending again, because it never
-auto-retries a send.
+`IDEMPOTENCY_KEY_REUSED`). After a 5xx on a `complete` the retry is therefore answered by
+the operation's own state rather than by a cached body (see
+[Recovering a lost on-chain completion](#recovering-a-lost-on-chain-completion)).
 
 | Method | Path                                | Auth     | Idempotency-Key |
 | ------ | ----------------------------------- | -------- | --------------- |
@@ -65,6 +60,7 @@ auto-retries a send.
 | GET    | `/v1/wallet/balances`               | bearer   | —               |
 | GET    | `/v1/wallet/unspents`               | bearer   | —               |
 | GET    | `/v1/wallet/transfers`              | bearer   | —               |
+| GET    | `/v1/wallet/transactions`           | bearer   | —               |
 | POST   | `/v1/wallet/receive`                | bearer   | —               |
 | POST   | `/v1/wallet/sync`                   | bearer   | —               |
 | POST   | `/v1/onchain/send-btc/prepare`      | bearer   | required        |
@@ -75,52 +71,33 @@ auto-retries a send.
 | POST   | `/v1/onchain/create-utxos/complete` | bearer   | required        |
 | GET    | `/v1/onchain/operations/:opId`      | bearer   | —               |
 | GET    | `/v1/onchain/fee-estimate`          | bearer   | —               |
-| POST   | `/v1/ln/deposit/prepare`            | bearer   | required        |
-| POST   | `/v1/ln/pay`                        | bearer   | required        |
-| POST   | `/v1/ln/invoice`                    | bearer   | —               |
-| GET    | `/v1/ln/invoice/:hash`              | bearer   | —               |
-| GET    | `/v1/ln/payments`                   | bearer   | —               |
-| GET    | `/v1/ln/balance`                    | bearer   | —               |
-| POST   | `/v1/ln/withdraw`                   | bearer   | required        |
 
 Every response carries an `x-request-id` header (a fresh random UUID per
 request; a caller-supplied one is never adopted). Error bodies carry only `code`
-and `message` — the RLN or wallet failure they were mapped from is logged under
-that id and nowhere else, so it is the handle to quote when asking an operator
-about a `COMPLETE_AMBIGUOUS` or `WITHDRAWAL_UNRESOLVED`.
+and `message` — the wallet failure they were mapped from is logged under that id
+and nowhere else, so it is the handle to quote when asking an operator about a
+`COMPLETE_AMBIGUOUS`.
 
 ### Errors
 
 Every error response is `{"error": {"code", "message"}}`. Notable codes:
 
-| Code                                     | Status    | Meaning                                                                                                                                                                                                                                        |
-| ---------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QUEUE_FULL`                             | 429       | Per-user queue depth exceeded; a `retry-after` header accompanies it.                                                                                                                                                                          |
-| `AMOUNT_REQUIRED`                        | 400       | BTC invoices must declare `amtMsat`, asset invoices `assetAmount` (their `amtMsat` HTLC carrier defaults to `GATEWAY_ASSET_INVOICE_MIN_MSAT`), and paying an amount-less invoice requires `amtMsat` (a float-cap bypass).                      |
-| `AMOUNT_MISMATCH`                        | 400       | `amtMsat` or `assetAmount` conflicts with the amount encoded in the invoice.                                                                                                                                                                   |
-| `AMOUNT_BELOW_MINIMUM`                   | 400       | An asset invoice's `amtMsat` HTLC carrier value is under `GATEWAY_ASSET_INVOICE_MIN_MSAT`; the node would refuse it.                                                                                                                           |
-| `INVOICE_REJECTED`                       | 400       | The node rejected these invoice parameters. Detail stays server-side.                                                                                                                                                                          |
-| `INVALID_INVOICE`                        | 400       | The BOLT11 could not be decoded, or its amount is zero / outside the safe-integer range.                                                                                                                                                       |
-| `PAYMENT_REJECTED` / `WITHDRAW_REJECTED` | 400       | The node rejected this payment or withdrawal (an RLN 4xx). The debit is refunded. Detail stays server-side.                                                                                                                                    |
-| `WITNESS_AMOUNT_REQUIRED`                | 400       | An RGB withdraw to a `wvout:` recipient needs `witnessAmountSat` (rgb-lib rejects a witness beneficiary without it). The node funds that output, so its sats are debited from the caller's msat float.                                         |
-| `TRANSPORT_ENDPOINT_NOT_ALLOWED`         | 400       | Consignment endpoint outside `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (SSRF guard).                                                                                                                                                                   |
-| `WALLET_REQUEST_REJECTED`                | 400       | rgb-lib rejected the request itself — bad recipient id, asset id, address, fee rate or transport endpoint. Detail stays server-side.                                                                                                           |
-| `INSUFFICIENT_FUNDS`                     | 400       | Not enough confirmed bitcoins, assets or allocation slots for an on-chain operation.                                                                                                                                                           |
-| `PSBT_REJECTED` / `PSBT_MISMATCH`        | 400       | The signed PSBT was rejected, or does not correspond to the prepared operation.                                                                                                                                                                |
-| `FLOAT_CAP_EXCEEDED`                     | 409       | Per-user or global float cap would be exceeded by this new exposure.                                                                                                                                                                           |
-| `INSUFFICIENT_BALANCE`                   | 409       | The user's ledger balance is short.                                                                                                                                                                                                            |
-| `IDEMPOTENCY_KEY_REUSED`                 | 409       | Same key, different request body.                                                                                                                                                                                                              |
-| `IDEMPOTENCY_IN_FLIGHT`                  | 409       | A request with this key is still running.                                                                                                                                                                                                      |
-| `PAYMENT_CONFLICT`                       | 409       | Another user is already paying this invoice.                                                                                                                                                                                                   |
-| `PAYMENT_ALREADY_ATTEMPTED`              | 409       | This invoice already failed and was refunded — request a fresh invoice rather than re-paying an old one.                                                                                                                                       |
-| `WITHDRAWAL_ALREADY_ATTEMPTED`           | 409       | A withdrawal under this key failed and was refunded — use a fresh key. (A rejection answered 4xx is instead replayed from the idempotency cache.)                                                                                              |
-| `WITHDRAWAL_UNRESOLVED`                  | 409       | A withdrawal under this key is unresolved and may have broadcast; operator resolution required (see Known limitations).                                                                                                                        |
-| `DEPOSIT_ADDRESS_CONFLICT`               | 502       | RLN returned a deposit address (or RGB `recipient_id`) already assigned to another intent — it is misconfigured (see the deployment note).                                                                                                     |
-| `OP_EXPIRED`                             | 410       | The prepared on-chain operation passed `GATEWAY_ONCHAIN_OP_TTL_SECONDS`; prepare again.                                                                                                                                                        |
-| `UPSTREAM_ERROR` / `UPSTREAM_TIMEOUT`    | 502 / 504 | Sanitized RLN failures.                                                                                                                                                                                                                        |
-| `AMOUNT_NOT_REPRESENTABLE`               | 502       | The wallet holds an amount above 2^53−1, which JSON numbers cannot carry exactly. Permanent, and not the caller's fault: reported rather than silently rounded (see Known limitations).                                                        |
-| `FEE_ESTIMATE_UNAVAILABLE`               | 502       | The indexer gave no usable fee estimate. Detail stays server-side.                                                                                                                                                                             |
-| `COMPLETE_AMBIGUOUS`                     | 502       | The wallet failed while completing an on-chain op, after rgb-lib may already have broadcast. The op stays pending with its txid recorded; read it back with `GET /v1/onchain/operations/:opId` and retry `complete` to finish the bookkeeping. |
+| Code                              | Status | Meaning                                                                                                                                                                                                                                        |
+| --------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QUEUE_FULL`                      | 429    | Per-user queue depth exceeded; a `retry-after` header accompanies it.                                                                                                                                                                          |
+| `TRANSPORT_ENDPOINT_NOT_ALLOWED`  | 400    | Consignment endpoint outside `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (SSRF guard).                                                                                                                                                                   |
+| `WALLET_REQUEST_REJECTED`         | 400    | rgb-lib rejected the request itself — bad recipient id, asset id, address, fee rate or transport endpoint. Detail stays server-side.                                                                                                           |
+| `INSUFFICIENT_FUNDS`              | 400    | Not enough confirmed bitcoins, assets or allocation slots for an on-chain operation.                                                                                                                                                           |
+| `PSBT_REJECTED` / `PSBT_MISMATCH` | 400    | The signed PSBT was rejected, or does not correspond to the prepared operation.                                                                                                                                                                |
+| `IDEMPOTENCY_KEY_REUSED`          | 409    | Same key, different request body.                                                                                                                                                                                                              |
+| `IDEMPOTENCY_IN_FLIGHT`           | 409    | A request with this key is still running.                                                                                                                                                                                                      |
+| `XPUBS_MISMATCH`                  | 409    | Different xpubs are already registered for this user; registration is permanent.                                                                                                                                                               |
+| `FINGERPRINT_IN_USE`              | 409    | Another user already registered this master fingerprint. rgb-node-api keys wallets by fingerprint alone, so it cannot be shared (I3).                                                                                                          |
+| `OP_EXPIRED`                      | 410    | The prepared on-chain operation passed `GATEWAY_ONCHAIN_OP_TTL_SECONDS`; prepare again.                                                                                                                                                        |
+| `AMOUNT_NOT_REPRESENTABLE`        | 502    | The wallet holds an amount above 2^53−1, which JSON numbers cannot carry exactly. Permanent, and not the caller's fault: reported rather than silently rounded (see Known limitations).                                                        |
+| `FEE_ESTIMATE_UNAVAILABLE`        | 502    | The indexer gave no usable fee estimate. Detail stays server-side.                                                                                                                                                                             |
+| `WALLET_OPERATION_UNSUPPORTED`    | 501    | The configured rgb-node-api has no route for this operation (see [rgb-node-api](#rgb-node-api)). Nothing was attempted. Detail stays server-side.                                                                                              |
+| `COMPLETE_AMBIGUOUS`              | 502    | The wallet failed while completing an on-chain op, after rgb-lib may already have broadcast. The op stays pending with its txid recorded; read it back with `GET /v1/onchain/operations/:opId` and retry `complete` to finish the bookkeeping. |
 
 ## What the wallet reads carry for a verifying client
 
@@ -144,12 +121,26 @@ act on RGB state afterwards. Three things in the wallet responses exist for that
 `InflationRight`, `NonFungible`, ...), so a variant added upstream arrives named rather
 than dropped.
 
+## On-chain transactions
+
+`GET /v1/wallet/transactions` lists the wallet's on-chain transactions; rgb-node-api
+syncs against the indexer first, so there is no skip-sync variant. `?txid=<64 lowercase
+hex>` narrows it to that one transaction, and an unknown txid answers an empty list, not
+an error. rgb-node-api has no lookup by txid, so the gateway filters the full list.
+
+Each entry is `{transactionType, txid, receivedSat, sentSat, feeSat, confirmationTime}`.
+`transactionType` is rgb-lib's variant verbatim (`Incoming`, `SendBtc`, `CreateUtxos`,
+`RgbSend`, `Drain`, …). `confirmationTime` is `{height, timestamp}`, or `null` while
+unconfirmed. `sentSat` and `receivedSat` follow BDK: the value of the wallet's own inputs
+the transaction spent and of the outputs it pays back to the wallet, change included.
+They are not net amounts — what left the wallet is `sentSat - receivedSat`, fee included.
+
 ## Fee estimates
 
 `GET /v1/onchain/fee-estimate?blocks=N` (default `N=6`, range 1..1008) answers
 `{blocks, feeRateSatPerVb, sourceBlocks}` from the shared indexer. Clients cannot reach
-esplora themselves — it sits behind the gateway with RLN and the RGB proxy — so without
-this they either hardcode a rate or send none and take the 2 sat/vB default.
+esplora themselves — it sits behind the gateway with rgb-node-api and the RGB proxy — so
+without this they either hardcode a rate or send none and take the 2 sat/vB default.
 
 `feeRateSatPerVb` is a whole sat/vB in the same 1..1000 range every fee-taking route
 accepts, so it can be passed straight back. Two roundings are deliberate, both away from
@@ -217,8 +208,8 @@ Three boundaries on that:
   wallet call; otherwise the op is left for an operator rather than completed under a
   transaction its intent does not describe.
 - It stops after `GATEWAY_COMPLETIONS_MAX_ATTEMPTS`. An op that runs out of attempts stays
-  `pending` with its txid and needs a human: check the node for the recorded txid, then
-  mark the row completed or resolve it by hand. `CompletionsWorker.unresolved()` lists
+  `pending` with its txid and needs a human: check the chain (esplora) for the recorded
+  txid, then mark the row completed or resolve it by hand. `CompletionsWorker.unresolved()` lists
   exactly those rows and is what a health check should alert on.
 
 The op TTL deliberately does **not** apply here. The TTL exists so an _unsigned_ PSBT
@@ -232,64 +223,88 @@ All configuration comes from environment variables (`src/config.ts`).
 
 Required:
 
-| Variable                     | Meaning                                                                       |
-| ---------------------------- | ----------------------------------------------------------------------------- |
-| `RLN_URL`                    | Base URL of the single shared RLN instance (reachable only from the gateway). |
-| `ESPLORA_URL`                | Esplora REST API; used by the deposits watcher to confirm BTC deposits.       |
-| `RGB_PROXY_URL`              | RGB proxy endpoint handed to receive-invoice transport endpoints.             |
-| `GATEWAY_SQLITE_PATH`        | Path to the gateway SQLite database (`:memory:` for tests).                   |
-| `GATEWAY_WALLETS_DIR`        | Gateway-owned directory holding one watch-only wallet data-dir per user.      |
-| `GATEWAY_WALLET_INDEXER_URL` | Electrum `host:port` passed to rgb-lib `goOnline` for user wallets.           |
-| `GATEWAY_OPERATOR_TOKEN`     | Guards the bootstrap-only `POST /v1/users` route. Minimum 16 characters.      |
+| Variable                 | Meaning                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `RGB_NODE_API_URL`       | Base URL of the rgb-node-api service hosting the user wallets (reachable only from the gateway).                                  |
+| `ESPLORA_URL`            | Esplora REST API; source of `GET /v1/onchain/fee-estimate`.                                                                       |
+| `RGB_PROXY_URL`          | Default RGB consignment proxy for asset sends. Keep it identical to rgb-node-api's `proxy_address`, which receive invoices carry. |
+| `GATEWAY_SQLITE_PATH`    | Path to the gateway SQLite database (`:memory:` for tests).                                                                       |
+| `GATEWAY_OPERATOR_TOKEN` | Guards the bootstrap-only `POST /v1/users` route. Minimum 16 characters.                                                          |
 
 Optional (default in parentheses):
 
-| Variable                                         | Meaning                                                                                                                                                                                                                                              |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GATEWAY_HOST` (`127.0.0.1`)                     | Interface the gateway listens on.                                                                                                                                                                                                                    |
-| `GATEWAY_PORT` (`8480`)                          | Gateway HTTP port.                                                                                                                                                                                                                                   |
-| `RLN_ADMIN_TOKEN` (empty)                        | Biscuit admin token; empty when RLN runs with `--disable-authentication` on localhost. Never logged, never echoed (I4).                                                                                                                              |
-| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)            | rgb-lib network for user wallets: `Mainnet`, `Testnet`, `Testnet4`, `Signet`, `SignetCustom`, `Regtest`. **`Signet` means Bitcoin's _default_ signet** — see the indexer note below.                                                                 |
-| `GATEWAY_WALLET_MAX_OPEN` (`32`)                 | LRU capacity of the open-wallet pool.                                                                                                                                                                                                                |
-| `GATEWAY_ONCHAIN_OP_TTL_SECONDS` (`600`)         | Seconds an unsigned prepare-step PSBT stays completable before expiring.                                                                                                                                                                             |
-| `GATEWAY_FLOAT_CAP_PER_USER_MSAT` (`1000000000`) | Per-user ceiling on the custodial LN float.                                                                                                                                                                                                          |
-| `GATEWAY_FLOAT_CAP_GLOBAL_MSAT` (`10000000000`)  | Global ceiling on the custodial LN float.                                                                                                                                                                                                            |
-| `GATEWAY_DEPOSIT_MIN_CONFIRMATIONS` (`1`)        | Confirmations before a BTC/RGB deposit is credited to the ledger.                                                                                                                                                                                    |
-| `GATEWAY_DEPOSIT_TTL_SECONDS` (`86400`)          | Seconds an unfunded deposit intent stays pending (and counts against the float caps) before expiring.                                                                                                                                                |
-| `GATEWAY_ASSET_INVOICE_MIN_MSAT` (`3000000`)     | HTLC carrier value (msat) put on asset invoices that declare no `amtMsat`. Must match the node's `channels.htlc_min_msat` (or the higher `inbound_htlc_minimum_msat` of the asset's channels) — RLN refuses an asset invoice below that floor.       |
-| `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (empty)        | Comma-separated extra RGB consignment-proxy endpoints users may pin in withdraw/send-asset requests. `RGB_PROXY_URL` is always allowlisted; anything else is rejected with 400 `TRANSPORT_ENDPOINT_NOT_ALLOWED` (SSRF guard — the node dials these). |
-| `GATEWAY_DEPOSITS_INTERVAL_MS` (`10000`)         | Poll interval of the deposits watcher.                                                                                                                                                                                                               |
-| `GATEWAY_COMPLETIONS_INTERVAL_MS` (`30000`)      | Poll interval of the ambiguous-completion worker.                                                                                                                                                                                                    |
-| `GATEWAY_COMPLETIONS_MAX_ATTEMPTS` (`5`)         | Attempts at finishing one ambiguous operation before it is left to an operator.                                                                                                                                                                      |
-| `GATEWAY_RECONCILER_INTERVAL_MS` (`10000`)       | Poll interval of the payments reconciler.                                                                                                                                                                                                            |
-| `GATEWAY_RECONCILER_GRACE_SECONDS` (`600`)       | Age before the reconciler refunds a debited-pending send RLN does not know about (the send may still be queued behind RLN's global lock).                                                                                                            |
-| `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` (`4`)         | Max downstream operations running at once across all users.                                                                                                                                                                                          |
-| `GATEWAY_QUEUE_PER_USER_DEPTH` (`16`)            | Max queued+running operations per user before 429.                                                                                                                                                                                                   |
+| Variable                                      | Meaning                                                                                                                                                                                                                                                                      |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GATEWAY_HOST` (`127.0.0.1`)                  | Interface the gateway listens on.                                                                                                                                                                                                                                            |
+| `GATEWAY_PORT` (`8480`)                       | Gateway HTTP port.                                                                                                                                                                                                                                                           |
+| `GATEWAY_WALLET_SERVICE_TIMEOUT_MS` (`60000`) | Per-call timeout for rgb-node-api requests. A `complete` that times out is reported as `COMPLETE_AMBIGUOUS`, since the service may still finish it.                                                                                                                          |
+| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)         | Network of the user wallets: `Mainnet`, `Testnet`, `Testnet4`, `Signet`, `SignetCustom`, `Regtest`. Must match rgb-node-api's `network`; the gateway uses it to decode addresses and attribute deposit addresses. **`Signet` means Bitcoin's _default_ signet** — see below. |
+| `GATEWAY_WALLET_MAX_OPEN` (`32`)              | LRU capacity of the open-wallet pool. An evicted wallet is also dropped from rgb-node-api's memory (`/wallet/drop`), so this bounds what that service keeps loaded.                                                                                                          |
+| `GATEWAY_ONCHAIN_OP_TTL_SECONDS` (`600`)      | Seconds an unsigned prepare-step PSBT stays completable before expiring.                                                                                                                                                                                                     |
+| `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (empty)     | Comma-separated extra RGB consignment-proxy endpoints users may pin in send-asset requests. `RGB_PROXY_URL` is always allowlisted; anything else is rejected with 400 `TRANSPORT_ENDPOINT_NOT_ALLOWED` (SSRF guard — the wallet service dials these).                        |
+| `GATEWAY_COMPLETIONS_INTERVAL_MS` (`30000`)   | Poll interval of the ambiguous-completion worker.                                                                                                                                                                                                                            |
+| `GATEWAY_COMPLETIONS_MAX_ATTEMPTS` (`5`)      | Attempts at finishing one ambiguous operation before it is left to an operator.                                                                                                                                                                                              |
+| `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` (`4`)      | Max downstream operations running at once across all users.                                                                                                                                                                                                                  |
+| `GATEWAY_QUEUE_PER_USER_DEPTH` (`16`)         | Max queued+running operations per user before 429.                                                                                                                                                                                                                           |
 
-## Deployment note: RLN is gateway-only
+## rgb-node-api
 
-RLN is single-tenant and its API is node-wide: anyone who can reach it can see and move
-everything. It must therefore be reachable **only from the gateway** — bind it to
-localhost on the same host, or keep it on a private network segment with the gateway as
-the sole peer. **Never expose RLN publicly.** The gateway holds the only RLN credential:
-either a biscuit admin token (`RLN_ADMIN_TOKEN`), or RLN runs with
-`--disable-authentication`, which is acceptable strictly on localhost behind the gateway
-(invariant I4). The same applies to the esplora and RGB-proxy endpoints the node uses.
+### It is gateway-only
 
-**RLN must not run with `--reuse-addresses`** (nor `reuse_addresses = true` in its
-`config.toml`). The deposits watcher attributes on-chain funds by address, so every
-deposit intent needs an address no earlier intent has used; a reused address would let
-one payment credit several users' ledgers. The gateway refuses such an intent with 502
-`DEPOSIT_ADDRESS_CONFLICT` — seeing that code means RLN is misconfigured. RGB deposit
-intents are held to the same rule on the `recipient_id` the node blinds for them, for
-the same reason (the watcher attributes RGB by recipient id).
+rgb-node-api has no authentication: a request names a wallet by three headers
+(`xpub-van`, `xpub-col`, `master-fingerprint`), so anyone who can reach it and knows a
+user's xpubs can read that wallet and prepare spends from it. It must therefore be
+reachable **only from the gateway** — bind it to localhost on the same host, or keep it on
+a private network segment with the gateway as the sole peer. **Never expose it
+publicly** (invariant I4). The same applies to the indexer and RGB proxy it uses.
 
-## Indexer requirements
+It also keys the wallets it has loaded — in memory and on disk — by master fingerprint
+alone. The gateway therefore lets each fingerprint be registered by exactly one user and
+answers any other with 409 `FINGERPRINT_IN_USE` before calling rgb-node-api at all (a
+`UNIQUE` index backs this up). Do not let anything but the gateway register wallets on the
+same rgb-node-api instance.
 
-`GATEWAY_WALLET_INDEXER_URL` accepts **either** an Electrum server (`host:port`,
-`ssl://host:port`) **or** an esplora REST base URL (`https://…`). The published rgb-lib
-native module carries both the `electrum` and `esplora` features, and rgb-lib picks the
-client by probing Electrum first and falling back to esplora.
+### Routes the gateway calls
+
+All `POST /wallet/<route>` with JSON bodies:
+
+| Gateway call                | rgb-node-api route                                    |
+| --------------------------- | ----------------------------------------------------- |
+| address, balances, unspents | `address`, `btcbalance`, `listassets`, `listunspents` |
+| transfers for one asset     | `listtransfers` `{asset_id}`                          |
+| on-chain transactions       | `listtransactions`                                    |
+| blind receive               | `blindreceive`                                        |
+| witness receive             | `witnessreceive`                                      |
+| send BTC                    | `sendbtcbegin` → `{psbt}`, `sendbtcend` → `{txid}`    |
+| send asset                  | `sendbegin`, `sendend`                                |
+| create UTXOs                | `createutxosbegin`, `createutxosend`                  |
+| sync + refresh              | `refresh`                                             |
+| pool eviction / shutdown    | `drop`                                                |
+
+All of them are in rgb-node-api from `0280e0e` on. The `v0.2.1` release predates
+`witnessreceive`, `sendbtcbegin` and `sendbtcend`; against it, `POST /v1/wallet/receive`
+with `mode: "witness"` and `POST /v1/onchain/send-btc/prepare` answer 501
+`WALLET_OPERATION_UNSUPPORTED`.
+
+`listtransfers` requires an asset id, so `GET /v1/wallet/transfers` without `assetId`
+lists the wallet's assets and then each asset's transfers (see Known limitations).
+
+### Settings to align
+
+- `network` must match `GATEWAY_BITCOIN_NETWORK`.
+- `proxy_address` is what receive invoices carry as their transport endpoint; keep
+  `RGB_PROXY_URL` identical to it.
+- Leave `bfa_enabled` off: the gateway passes asset schemas through verbatim and the
+  mobile client rejects a `bfa` asset.
+- rgb-node-api supports the NIA and (off mainnet) IFA schemas only. CFA and UDA assets
+  cannot be received through it.
+
+### Indexer requirements
+
+rgb-node-api's `indexer_address` accepts **either** an Electrum server (`tcp://host:port`,
+`ssl://host:port`) **or** an esplora REST base URL (`https://…`): it builds rgb-lib with
+both the `electrum` and `esplora` features, and rgb-lib picks the client by probing
+Electrum first and falling back to esplora.
 
 The two are not equivalent, and esplora is the more forgiving:
 
@@ -301,9 +316,9 @@ The two are not equivalent, and esplora is the more forgiving:
 
 So Blockstream/mempool `electrs` — the binary behind the esplora REST API — is **rejected
 over its Electrum port** (`verbose transactions are currently unsupported`) while working
-fine over its **esplora REST port**. Pointing this variable at the same esplora URL as
-`ESPLORA_URL` is a valid and usually simpler deployment; a full Electrum server
-(romanz/electrs, Fulcrum) is the alternative.
+fine over its **esplora REST port**. Pointing `indexer_address` at the same esplora URL
+as the gateway's `ESPLORA_URL` is a valid and usually simpler deployment; a full
+Electrum server (romanz/electrs, Fulcrum) is the alternative.
 
 ### `Signet` vs `SignetCustom`
 
@@ -312,24 +327,26 @@ running its own challenge is `SignetCustom`. Every signet shares the same genesi
 hash, so the indexer check alone will NOT catch the difference when using esplora — but
 the two are distinct chains to RGB and they tag invoices differently: `sb` for `Signet`,
 `sbc` for `SignetCustom`. Getting this wrong yields a wallet that opens cleanly and then
-produces RGB invoices no counterparty on the real chain will accept. Match whatever RLN
-is running (`--network signetcustom`).
+produces RGB invoices no counterparty on the real chain will accept. Set
+`GATEWAY_BITCOIN_NETWORK` to the same network as rgb-node-api's `network`.
 
 ### Diagnosing a failed `POST /v1/wallet/xpubs`
 
-Both mistakes surface as a wallet-open failure that names neither the variable nor the
-fix:
+Both mistakes surface as a wallet-open failure on rgb-node-api that names neither the
+setting nor the fix. The gateway log carries the rgb-lib variant
+(`rgb-node-api /wallet/address -> 500 InvalidIndexer: …`); rgb-node-api's own log
+carries the detail:
 
 ```
-RgbLib(InvalidIndexer { details: "resolver is for another chain-network pair" })
-RgbLib(InvalidIndexer { details: "... verbose transactions are unsupported ..." })
+InvalidIndexer { details: "resolver is for another chain-network pair" }
+InvalidIndexer { details: "... verbose transactions are unsupported ..." }
 ```
 
 If that route fails on a fresh deployment while every other route works, check these two
 first. Two commands settle it:
 
 ```sh
-# 1. Electrum URL only: does it support verbose transactions?
+# 1. Electrum indexer only: does it support verbose transactions?
 #    (result = usable, error = use the esplora URL instead, or a full Electrum server)
 printf '{"jsonrpc":"2.0","id":1,"method":"blockchain.transaction.get","params":["<a txid on your chain>",true]}\n' | nc <host> <port>
 
@@ -337,59 +354,12 @@ printf '{"jsonrpc":"2.0","id":1,"method":"blockchain.transaction.get","params":[
 curl -s -o /dev/null -w '%{http_code}\n' "$ESPLORA_URL/tx/8153034f45e695453250a8fb7225a5e545144071d8ed7b0d3211efa1f3c92ad8"
 ```
 
-## Float-cap tuning
-
-The LN working balance is custodial (see the custody boundary below), so the caps are
-the loss bound: `GATEWAY_FLOAT_CAP_PER_USER_MSAT` bounds what any one user can lose if
-the node or gateway is compromised, and `GATEWAY_FLOAT_CAP_GLOBAL_MSAT` bounds the total
-custodial exposure of the deployment. Caps are enforced where new custodial exposure is
-created — deposit prepare and invoice creation, counting pending intents so parallel
-prepares cannot overshoot — while settlement credits and refunds are never blocked
-(refusing them would strand funds the node already holds).
-
-**The caps cover BTC only.** They are denominated in msat and are checked on the BTC
-legs alone — `POST /v1/ln/deposit/prepare {kind:'rgb'}` and the `assetAmount` of an asset
-invoice pass no headroom check, so RGB units enter the custodial float unbounded (only
-the msat HTLC carrier of an asset invoice is capped). There is no meaningful common
-denomination to cap heterogeneous RGB assets against, so per-asset ceilings are deferred
-rather than guessed; until they land, the loss bound above is a bound on custodial
-_bitcoin_, and RGB custodial exposure must be monitored out of band.
-
-One consequence is worth stating plainly: the cap is checked against the amount
-_declared_ at deposit-prepare time, while the watcher credits what actually confirmed on
-chain. A user who declares a small deposit and then over-funds the returned address is
-credited the full confirmed amount, so the caps bound _accepted intents_, not the
-absolute custodial total. Refusing the excess would strand funds the node already holds,
-so the trade-off is deliberate; monitor for it rather than relying on the cap alone.
-
-Start small: set the global
-cap to what the operation can afford to lose outright, the per-user cap to a routine
-spending balance (defaults: 0.01 BTC per user, 0.1 BTC global), and revisit after
-load-testing real usage. The global cap must also stay below the node's actual outbound
-channel liquidity, or deposits will be accepted that cannot be spent.
-
 ## The custody boundary, honestly
 
-Quoted verbatim from `docs/design/lightweight-sdk-and-lightweight-rln.md`:
-
-> Client-held keys cover **at-rest user funds**: on-chain BTC and RGB allocations on user
-> UTXOs cannot move without a client signature (for RGB, subject to the send-time limitation
-> above). They do **not** cover the Lightning working balance — an LN protocol constraint,
-> not an implementation gap: channel funds are controlled by the channel keys and the shared
-> node is their single owner, so balances inside its channels (in-flight HTLCs, routed
-> float, funds awaiting sweep) are custodial.
->
-> Mitigations, cheapest first (effort classes are estimates):
->
-> | Mitigation                                                                                                                                                                                                        | Where                      | Effort       |
-> | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------ |
-> | Capped float: hard per-user + global ceiling on custodial LN balance                                                                                                                                              | gateway policy             | days         |
-> | Auto-sweep: above a threshold, prepare on-chain sweep to user keys, client signs                                                                                                                                  | gateway + client SDK       | days         |
-> | Submarine/atomic swaps for trust-minimized in/out via the existing swap API (`/makerinit`, `/makerexecute`, `/taker`, `src/main.rs:228-229,246`) and UTEXO thunder-swap                                           | gateway + existing RLN API | weeks        |
-> | Per-user signer over a WebSocket `ExternalSignerTransport` (`src/signer/transport.rs:56`; today framed TCP + mTLS, `src/signer/remote/mod.rs`, browser-unreachable; `/initexternalsigner`: `src/main.rs:255-256`) | RLN + SDK                  | weeks        |
-> | Per-user RLN nodes, or the wasm node in the browser (Block 2) — full self-custody                                                                                                                                 | infra / SDK                | weeks–months |
-
-The "send-time limitation above" it references, also verbatim:
+Every user fund is at rest on user keys: on-chain BTC and RGB allocations on user UTXOs
+cannot move without a client signature, and there is no custodial balance. Neither the
+gateway nor rgb-node-api can sign. The one stated limitation, verbatim from
+`docs/design/lightsdk-architecture.md`:
 
 > Stated limitation — **send-time trust for RGB state**. The opret commitment bytes are
 > opaque to the client, and in RGB the bitcoin-level spend of a colored input _is_ the
@@ -401,26 +371,20 @@ The "send-time limitation above" it references, also verbatim:
 > **at rest** — nothing moves without a client signature — while every server-prepared
 > colored spend exposes its inputs' allocations. Interim controls are server-side (hardened
 > wallet service, independent consignment audit); removing the trust means shipping RGB
-> validation client-side, i.e. the wasm variant.
-
-Of the mitigation table, this gateway implements the first row (the capped float);
-the rest are deliberately deferred (see the workspace README).
+> validation client-side.
 
 ## Known limitations
 
-- **Synchronous wallet FFI.** rgb-lib wallet calls are synchronous native FFI on the
-  main thread — a slow indexer round-trip stalls all requests while it runs. Moving
-  wallet calls onto a worker-thread pool is future work.
-- **Fee subsidy.** LN routing fees and on-chain withdrawal fees are paid by the node,
-  not debited from user balances — an operator subsidy whose exposure is bounded by the
-  float caps. The _value_ the node pays out is not subsidized: an RGB withdraw to a
-  `wvout:` recipient debits `witnessAmountSat` (in msat) from the caller's BTC float,
-  because rgb-lib funds that new output from the node's on-chain wallet into a script the
-  caller names — a withdraw the caller cannot cover answers 409 `INSUFFICIENT_BALANCE`.
-- **One-shot deposit crediting.** A deposit intent expires after
-  `GATEWAY_DEPOSIT_TTL_SECONDS`, and each intent credits exactly once — on the first
-  confirmed poll. Later payments to the same address are not credited; prepare a fresh
-  deposit per payment.
+- **Pending receives without an asset are not listed.** A receive created without an
+  `assetId` has no asset until the sender's transfer arrives, and rgb-node-api lists
+  transfers by asset only. Until then, `GET /v1/wallet/transfers` leaves it out; the
+  client already holds its `recipientId` and `batchTransferIdx` from the
+  `POST /v1/wallet/receive` response. Once the transfer arrives it is listed under its
+  asset.
+- **rgb-node-api runs every wallet operation on one thread.** All users' calls, and its
+  periodic background refresh of every loaded wallet, are serialized on a single worker,
+  so one slow indexer sync stalls everyone. `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` bounds how
+  much the gateway queues there, but not that service's throughput.
 - **Amounts above 2^53−1 are reported, not rounded.** rgb-lib counts assets in u64 while
   JSON numbers are doubles, so a balance or assignment above `Number.MAX_SAFE_INTEGER`
   cannot round-trip. It is detected exactly (any such u64 decodes to at least 2^53) and
@@ -428,24 +392,10 @@ the rest are deliberately deferred (see the workspace README).
   Carrying such amounts losslessly needs decimal-string fields on the wire, which is a
   breaking change to the wallet read routes and is deferred; until then an asset with a
   supply that large is unusable through this gateway rather than silently mis-reported.
-- **Ambiguous withdrawals need manual resolution.** The completions worker covers the
-  on-chain `pending_ops` table; the LN `withdrawals` table has no equivalent. The
-  reconciler drives LN _payments_ to a terminal state but does not cover `withdrawals`. If RLN times out or
-  answers 5xx mid-`/sendbtc`/`/sendrgb` — rgb-lib broadcasts before writing its
-  bookkeeping, and every post-broadcast failure surfaces as a 500, so the transaction may
-  already be on the network — the row is marked `ambiguous`, the debit stands, and
-  same-key retries answer 409 `WITHDRAWAL_UNRESOLVED`. The operator must check the node
-  (`/listtransactions`, `/listtransfers`) for a matching broadcast and then, in the
-  gateway SQLite, either mark the row `sent` with its txid or mark it `failed` and post
-  a compensating `refund` ledger entry. There is no admin API for this yet.
 - **Address attribution is best-effort.** `GET /v1/wallet/address` reports the derivation
   it recovered by re-deriving candidates from the registered xpub and matching the script,
   because rgb-lib's `get_address` returns only the encoded address. The scan follows the
   user's own high-water mark plus a window, so it covers sequential use; a wallet restored
-  far past that window, or an rgb-lib `reuse_addresses` deployment, reports `derivation:
-null`. A client that needs ownership proof must treat null as unproven — it is the same
-  position it was in when the route returned a bare string.
-- **Unattributable RGB deposits stay pending.** If a settled RGB transfer for a deposit
-  target carries no fungible assignment, the watcher cannot tell what was received and
-  leaves the intent pending with a warning rather than crediting the declared amount
-  (which would mint ledger units the node may not hold — RGB credits are not capped).
+  far past that window reports `derivation: null` (rgb-node-api builds its wallets with
+  `reuse_addresses = false`). A client that needs ownership proof must treat null as
+  unproven — it is the same position it was in when the route returned a bare string.

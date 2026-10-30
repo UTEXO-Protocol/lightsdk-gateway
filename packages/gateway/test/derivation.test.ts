@@ -19,7 +19,7 @@ import {
   VANILLA_KEYCHAIN,
 } from '../src/wallets/derivation.js';
 
-/** Real regtest account xpubs (deterministic fixture, Preflight A script). */
+/** Real regtest account xpubs (deterministic fixture). */
 const VANILLA_TPUB =
   'tpubDDfvzhdVV4unsoKt5aE6dcsNsfeWbTgmLZPi8LQDYU2xixrYemMfWJ3BaVneH3u7DBQePdTwhpybaKRU95pi6PMUtLPBJLVQRpzEnjfjZzX';
 const COLORED_TPUB =
