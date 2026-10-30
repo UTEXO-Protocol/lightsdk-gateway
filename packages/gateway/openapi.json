@@ -1,0 +1,3474 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "lightsdk-gateway API",
+    "version": "0.1.0",
+    "description": "REST gateway in front of a private rgb-node-api service that hosts one watch-only rgb-lib wallet per user. Neither the gateway nor rgb-node-api holds keys: an on-chain operation is prepared here, signed by the client, and completed here.\n\n## Authentication\n\nUsers send `Authorization: Bearer <token>`. `POST /v1/users` issues tokens and takes the operator token in `x-operator-token`.\n\n## Idempotency\n\nThe prepare and complete routes require an `Idempotency-Key` header of 1 to 128 characters, scoped to the user. A retry with the same key and the same request (method, route and body) returns the stored response, error responses included, marked `x-idempotent-replay: true`. The same key on a different request answers 409 `IDEMPOTENCY_KEY_REUSED`. Responses with status 429 or 5xx are not stored, so that request can be retried under the same key. A key whose request never finished can be reclaimed by the same request after 15 minutes. Stored responses are kept for 7 days.\n\n## Errors\n\nError bodies are `{\"error\": {\"code\", \"message\"}}`; branch on `code`. Every response carries an `x-request-id` header. Error details stay in the gateway's log under that id, so quote it to an operator. A path the gateway does not serve answers Fastify's default 404 body instead.\n\n## Requests\n\nJSON bodies of at most 64 KiB. Unknown fields in a body or query string are removed before processing, not rejected. Amounts are JSON numbers: sats for BTC, asset units for RGB."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8480",
+      "description": "Default listen address (`GATEWAY_HOST`, `GATEWAY_PORT`)."
+    }
+  ],
+  "tags": [
+    {
+      "name": "System",
+      "description": "Liveness."
+    },
+    {
+      "name": "Users",
+      "description": "User bootstrap and identity."
+    },
+    {
+      "name": "Wallet",
+      "description": "Reads and receives on the user's watch-only wallet. Every route but the registration needs registered xpubs."
+    },
+    {
+      "name": "On-chain",
+      "description": "Prepare, sign on the client, complete; plus recovery and fee estimates."
+    }
+  ],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Liveness check",
+        "description": "Answers while the process is up. It checks neither rgb-node-api nor the indexer.",
+        "tags": [
+          "System"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The gateway is up.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/users": {
+      "post": {
+        "operationId": "createUser",
+        "summary": "Create a user",
+        "description": "Operator-only bootstrap. The response is the only time the user's bearer token is shown: the gateway stores just its hash, so a lost token cannot be recovered. Takes no body.",
+        "tags": [
+          "Users"
+        ],
+        "security": [
+          {
+            "operatorToken": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The user was created.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string",
+                      "description": "Opaque user id (`u_` and 32 hex characters)."
+                    },
+                    "token": {
+                      "type": "string",
+                      "description": "The user's bearer token. Returned only here: the gateway stores just its hash."
+                    },
+                    "createdAt": {
+                      "type": "integer",
+                      "description": "Unix milliseconds."
+                    }
+                  },
+                  "required": [
+                    "userId",
+                    "token",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `OPERATOR_UNAUTHORIZED`: Missing or wrong `x-operator-token`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "getMe",
+        "summary": "Current user",
+        "description": "The user the bearer token belongs to.",
+        "tags": [
+          "Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The authenticated user.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "userId": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "integer",
+                      "description": "Unix milliseconds."
+                    }
+                  },
+                  "required": [
+                    "userId",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/xpubs": {
+      "post": {
+        "operationId": "registerXpubs",
+        "summary": "Register account xpubs",
+        "description": "Creates the user's watch-only wallet on rgb-node-api from their two account xpubs. Registration is permanent: the same three values again answer 201 again, different ones 409 `XPUBS_MISMATCH`. A master fingerprint can belong to one user only.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vanilla": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9]{100,120}$",
+                    "description": "Base58 account xpub of the vanilla (BTC) keychain."
+                  },
+                  "colored": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9]{100,120}$",
+                    "description": "Base58 account xpub of the colored (RGB) keychain."
+                  },
+                  "fingerprint": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}$",
+                    "description": "Master key fingerprint, 8 lowercase hex characters."
+                  }
+                },
+                "required": [
+                  "vanilla",
+                  "colored",
+                  "fingerprint"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered, or already registered with exactly these values.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "fingerprint": {
+                      "type": "string",
+                      "description": "The registered master fingerprint."
+                    },
+                    "address": {
+                      "type": "string",
+                      "description": "A deposit address from the vanilla wallet."
+                    }
+                  },
+                  "required": [
+                    "fingerprint",
+                    "address"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `INVALID_XPUBS`: rgb-lib could not build a wallet from these xpubs. Nothing was registered.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `XPUBS_MISMATCH`: Different xpubs are already registered for this user; registration is permanent.\n- `FINGERPRINT_IN_USE`: Another user already registered this master fingerprint. rgb-node-api keys wallets by fingerprint alone, so it cannot be shared.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/address": {
+      "get": {
+        "operationId": "getAddress",
+        "summary": "Next deposit address",
+        "description": "Reveals the next address of the vanilla (BTC) wallet, with the derivation it came from so the client can re-derive it from its own seed before showing it.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A deposit address.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string",
+                      "description": "Next deposit address of the vanilla wallet."
+                    },
+                    "derivation": {
+                      "type": [
+                        "null",
+                        "object"
+                      ],
+                      "description": "Where the address came from, so the client can re-derive it from its own seed before showing it. Null when the gateway could not attribute it: treat the address as unproven.",
+                      "properties": {
+                        "account": {
+                          "type": "string",
+                          "enum": [
+                            "vanilla"
+                          ]
+                        },
+                        "keychain": {
+                          "type": "integer",
+                          "description": "Keychain index in the path (0)."
+                        },
+                        "index": {
+                          "type": "integer",
+                          "description": "Child index of the address."
+                        },
+                        "derivationPath": {
+                          "type": "string",
+                          "description": "Full path from the master key, `m/86'/<coin>'/0'/<keychain>/<index>`."
+                        },
+                        "scriptHex": {
+                          "type": "string",
+                          "description": "The address's output script, hex."
+                        }
+                      },
+                      "required": [
+                        "account",
+                        "keychain",
+                        "index",
+                        "derivationPath",
+                        "scriptHex"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "derivation"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/balances": {
+      "get": {
+        "operationId": "getBalances",
+        "summary": "BTC and asset balances",
+        "description": "BTC on both keychains, and every RGB asset the wallet knows with its balance.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The balances.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "btc": {
+                      "type": "object",
+                      "properties": {
+                        "vanilla": {
+                          "$ref": "#/components/schemas/Balance",
+                          "description": "BTC on the vanilla keychain, in sats."
+                        },
+                        "colored": {
+                          "$ref": "#/components/schemas/Balance",
+                          "description": "BTC on the colored keychain, which holds the RGB allocations, in sats."
+                        }
+                      },
+                      "required": [
+                        "vanilla",
+                        "colored"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "assets": {
+                      "type": "array",
+                      "description": "Every RGB asset the wallet knows.",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "assetId": {
+                            "type": "string",
+                            "description": "RGB contract id."
+                          },
+                          "schema": {
+                            "type": "string",
+                            "description": "rgb-lib AssetSchema, verbatim (`Nia`, `Ifa`, ...)."
+                          },
+                          "ticker": {
+                            "type": [
+                              "null",
+                              "string"
+                            ],
+                            "description": "Null for schemas without one."
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "details": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "precision": {
+                            "type": "integer",
+                            "description": "Decimal places of one asset unit."
+                          },
+                          "issuedSupply": {
+                            "type": [
+                              "null",
+                              "integer"
+                            ],
+                            "description": "Total issued amount; null for schemas without one (UDA)."
+                          },
+                          "timestamp": {
+                            "type": "integer",
+                            "description": "Unix seconds of the asset genesis."
+                          },
+                          "addedAt": {
+                            "type": "integer",
+                            "description": "Unix seconds when this wallet imported the asset."
+                          },
+                          "balance": {
+                            "$ref": "#/components/schemas/Balance",
+                            "description": "In asset units."
+                          }
+                        },
+                        "required": [
+                          "assetId",
+                          "schema",
+                          "ticker",
+                          "name",
+                          "details",
+                          "precision",
+                          "issuedSupply",
+                          "timestamp",
+                          "addedAt",
+                          "balance"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "btc",
+                    "assets"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `AMOUNT_NOT_REPRESENTABLE`: The wallet holds an amount above 2^53−1, which a JSON number cannot carry exactly. Permanent, and not the caller's fault.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/unspents": {
+      "get": {
+        "operationId": "getUnspents",
+        "summary": "UTXOs and their RGB allocations",
+        "description": "The wallet's UTXOs. Each carries its RGB allocations and the blind receives promised against it.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The UTXOs.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "unspents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "txid": {
+                            "type": "string"
+                          },
+                          "vout": {
+                            "type": "integer"
+                          },
+                          "amountSat": {
+                            "type": "number"
+                          },
+                          "colorable": {
+                            "type": "boolean",
+                            "description": "Whether the UTXO can hold RGB allocations."
+                          },
+                          "exists": {
+                            "type": "boolean",
+                            "description": "True once the transaction creating this UTXO has been broadcast."
+                          },
+                          "pendingBlinded": {
+                            "type": "integer",
+                            "description": "Blind receives already promised against this UTXO. Each reserves an allocation slot before it holds an allocation, so free slots cannot be counted from `allocations` alone."
+                          },
+                          "allocations": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "assetId": {
+                                  "type": [
+                                    "null",
+                                    "string"
+                                  ]
+                                },
+                                "amount": {
+                                  "type": [
+                                    "null",
+                                    "number"
+                                  ],
+                                  "description": "Fungible amount of `assignment`; null when it has none."
+                                },
+                                "assignment": {
+                                  "$ref": "#/components/schemas/Assignment"
+                                },
+                                "settled": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "assetId",
+                                "amount",
+                                "assignment",
+                                "settled"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "txid",
+                          "vout",
+                          "amountSat",
+                          "colorable",
+                          "exists",
+                          "pendingBlinded",
+                          "allocations"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "unspents"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `AMOUNT_NOT_REPRESENTABLE`: The wallet holds an amount above 2^53−1, which a JSON number cannot carry exactly. Permanent, and not the caller's fault.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/transfers": {
+      "get": {
+        "operationId": "getTransfers",
+        "summary": "RGB transfers",
+        "description": "Transfers of one asset, or of every asset the wallet knows. A receive created without an `assetId` is not listed until the sender's transfer arrives, because rgb-node-api lists transfers by asset only; the client already has its `recipientId` and `batchTransferIdx` from the receive response.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "assetId",
+            "in": "query",
+            "required": false,
+            "description": "List only this asset's transfers. Omitted: every known asset's.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The transfers.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transfers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "idx": {
+                            "type": "integer",
+                            "description": "rgb-lib transfer index."
+                          },
+                          "batchTransferIdx": {
+                            "type": [
+                              "null",
+                              "integer"
+                            ],
+                            "description": "Batch this transfer belongs to. rgb-lib refreshes, fails and deletes transfers by this index, not by `idx`."
+                          },
+                          "assetId": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "amount": {
+                            "type": [
+                              "null",
+                              "number"
+                            ],
+                            "description": "Requested amount, or else the total of the fungible assignments; null when there is neither."
+                          },
+                          "assignments": {
+                            "type": "array",
+                            "items": {
+                              "$ref": "#/components/schemas/Assignment"
+                            },
+                            "description": "Full assignment list; `amount` is only its fungible summary."
+                          },
+                          "kind": {
+                            "type": "string",
+                            "description": "rgb-lib TransferKind, verbatim (`ReceiveBlind`, `Send`, ...)."
+                          },
+                          "status": {
+                            "type": "string",
+                            "description": "rgb-lib TransferStatus, verbatim (`WaitingCounterparty`, `WaitingConfirmations`, `Settled`, `Failed`)."
+                          },
+                          "txid": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "recipientId": {
+                            "type": [
+                              "null",
+                              "string"
+                            ],
+                            "description": "Blinded UTXO or witness recipient id, when the transfer has one."
+                          },
+                          "expiration": {
+                            "type": [
+                              "null",
+                              "number"
+                            ],
+                            "description": "Unix seconds after which a pending transfer expires."
+                          },
+                          "createdAt": {
+                            "type": "number",
+                            "description": "Unix seconds."
+                          },
+                          "updatedAt": {
+                            "type": "number",
+                            "description": "Unix seconds."
+                          }
+                        },
+                        "required": [
+                          "idx",
+                          "batchTransferIdx",
+                          "assetId",
+                          "amount",
+                          "assignments",
+                          "kind",
+                          "status",
+                          "txid",
+                          "recipientId",
+                          "expiration",
+                          "createdAt",
+                          "updatedAt"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "transfers"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `AMOUNT_NOT_REPRESENTABLE`: The wallet holds an amount above 2^53−1, which a JSON number cannot carry exactly. Permanent, and not the caller's fault.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/transactions": {
+      "get": {
+        "operationId": "getTransactions",
+        "summary": "On-chain transactions",
+        "description": "Syncs the wallet against the indexer, then lists its on-chain transactions. With `txid`, only that one; an unknown txid answers an empty list, not an error.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "query",
+            "required": false,
+            "description": "Return only this transaction (an empty list when the wallet has none).",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The transactions.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "transactionType": {
+                            "type": "string",
+                            "description": "rgb-lib TransactionType, verbatim (`Incoming`, `SendBtc`, `CreateUtxos`, `RgbSend`, `Drain`, ...)."
+                          },
+                          "txid": {
+                            "type": "string"
+                          },
+                          "receivedSat": {
+                            "type": "integer",
+                            "description": "Value of the outputs paying the wallet, change included."
+                          },
+                          "sentSat": {
+                            "type": "integer",
+                            "description": "Value of the wallet's own inputs. What left the wallet is `sentSat - receivedSat`, fee included."
+                          },
+                          "feeSat": {
+                            "type": "integer"
+                          },
+                          "confirmationTime": {
+                            "type": [
+                              "null",
+                              "object"
+                            ],
+                            "description": "Null while unconfirmed.",
+                            "properties": {
+                              "height": {
+                                "type": "integer"
+                              },
+                              "timestamp": {
+                                "type": "integer",
+                                "description": "Unix seconds of the block."
+                              }
+                            },
+                            "required": [
+                              "height",
+                              "timestamp"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "transactionType",
+                          "txid",
+                          "receivedSat",
+                          "sentSat",
+                          "feeSat",
+                          "confirmationTime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "transactions"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `AMOUNT_NOT_REPRESENTABLE`: The wallet holds an amount above 2^53−1, which a JSON number cannot carry exactly. Permanent, and not the caller's fault.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/receive": {
+      "post": {
+        "operationId": "receive",
+        "summary": "Create an RGB invoice",
+        "description": "Creates a blind or witness receive on the user's wallet and returns its invoice. The invoice's transport endpoint is rgb-node-api's configured RGB proxy.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "blind",
+                      "witness"
+                    ],
+                    "description": "`blind`: the sender pays to a blinded UTXO of this wallet. `witness`: the sender creates a new output for this wallet."
+                  },
+                  "assetId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Restrict the invoice to this asset. Omitted: any asset."
+                  },
+                  "amount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Requested amount in asset units. Omitted: an amount-less invoice."
+                  },
+                  "durationSeconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 2592000,
+                    "description": "Invoice lifetime. Default 86400 (one day)."
+                  },
+                  "minConfirmations": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Confirmations before the incoming transfer settles. Default 1."
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The receive was created.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "invoice": {
+                      "type": "string",
+                      "description": "RGB invoice to give the sender."
+                    },
+                    "recipientId": {
+                      "type": "string",
+                      "description": "Blinded UTXO or witness recipient id the invoice names."
+                    },
+                    "expirationTimestamp": {
+                      "type": [
+                        "null",
+                        "number"
+                      ],
+                      "description": "Unix seconds when the invoice expires."
+                    },
+                    "batchTransferIdx": {
+                      "type": [
+                        "null",
+                        "integer"
+                      ],
+                      "description": "Batch index of the created receive, which rgb-lib refreshes, fails and deletes it by."
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "blind",
+                        "witness"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "invoice",
+                    "recipientId",
+                    "expirationTimestamp",
+                    "batchTransferIdx",
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "- `WALLET_OPERATION_UNSUPPORTED`: The configured rgb-node-api has no route for this operation (witness receives and BTC sends need rgb-node-api `0280e0e` or later). Nothing was attempted.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/sync": {
+      "post": {
+        "operationId": "sync",
+        "summary": "Sync and refresh the wallet",
+        "description": "Syncs the wallet against the indexer and refreshes its pending RGB transfers. Takes no body.",
+        "tags": [
+          "Wallet"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Synced.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/send-btc/prepare": {
+      "post": {
+        "operationId": "prepareSendBtc",
+        "summary": "Prepare a BTC send",
+        "description": "Builds an unsigned PSBT that pays `amountSat` to `address` from the vanilla wallet. Check it against `intent`, sign it, and complete it before `expiresAt`.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9]{14,90}$",
+                    "description": "Recipient address on the gateway's network."
+                  },
+                  "amountSat": {
+                    "type": "integer",
+                    "minimum": 294
+                  },
+                  "feeRateSatPerVb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Fee rate in sat/vB. Default 2."
+                  }
+                },
+                "required": [
+                  "address",
+                  "amountSat"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Prepared.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `INVALID_ADDRESS`: Not a valid address on the gateway's network.\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "- `WALLET_OPERATION_UNSUPPORTED`: The configured rgb-node-api has no route for this operation (witness receives and BTC sends need rgb-node-api `0280e0e` or later). Nothing was attempted.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/send-btc/complete": {
+      "post": {
+        "operationId": "completeSendBtc",
+        "summary": "Broadcast a signed BTC send",
+        "description": "Submit the client-signed PSBT of a prepared operation. rgb-lib finalizes and broadcasts it. Retrying with the same `Idempotency-Key` returns the stored outcome. A 502 `COMPLETE_AMBIGUOUS` means the transaction may already be on the network: don't treat it as a failure. Read the operation instead; the gateway finishes the bookkeeping itself.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Broadcast and recorded.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "txid": {
+                      "type": "string",
+                      "description": "The broadcast transaction."
+                    }
+                  },
+                  "required": [
+                    "txid"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `PSBT_MISMATCH`: The signed PSBT is a different transaction from the one this operation prepared.\n- `PSBT_REJECTED`: rgb-lib rejected the signed PSBT (bad signature or tampering). It was not broadcast.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).\n- `OP_NOT_FOUND`: No such operation for this user. Another user's operation reads the same.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.\n- `OP_KIND_MISMATCH`: The operation was prepared by a different flow.\n- `OP_ALREADY_COMPLETED`: The operation was already completed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "- `OP_EXPIRED`: The operation passed `expiresAt`; prepare again.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "- `WALLET_OPERATION_UNSUPPORTED`: The configured rgb-node-api has no route for this operation (witness receives and BTC sends need rgb-node-api `0280e0e` or later). Nothing was attempted.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `COMPLETE_AMBIGUOUS`: The wallet failed after the transaction may have been broadcast. The operation stays pending with its txid recorded; read it with `GET /v1/onchain/operations/{opId}` instead of assuming the send failed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/send-asset/prepare": {
+      "post": {
+        "operationId": "prepareSendAsset",
+        "summary": "Prepare an RGB asset send",
+        "description": "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "assetId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "amount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Asset units."
+                  },
+                  "recipientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Recipient id from the recipient's invoice (blinded UTXO or witness)."
+                  },
+                  "witnessAmountSat": {
+                    "type": "integer",
+                    "minimum": 294,
+                    "description": "Sats for the witness output. Give it for a witness recipient only."
+                  },
+                  "transportEndpoints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1,
+                    "maxItems": 4,
+                    "description": "Consignment endpoints, each on the operator's allowlist. Default: the gateway's `RGB_PROXY_URL`."
+                  },
+                  "donation": {
+                    "type": "boolean",
+                    "description": "rgb-lib donation: don't wait for the recipient's acknowledgement. Default false."
+                  },
+                  "minConfirmations": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Confirmations required on the spent inputs. Default 1."
+                  },
+                  "feeRateSatPerVb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Fee rate in sat/vB. Default 2."
+                  }
+                },
+                "required": [
+                  "assetId",
+                  "amount",
+                  "recipientId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Prepared.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `TRANSPORT_ENDPOINT_NOT_ALLOWED`: A transport endpoint is not on the operator's allowlist (SSRF guard).\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/send-asset/complete": {
+      "post": {
+        "operationId": "completeSendAsset",
+        "summary": "Broadcast a signed asset send",
+        "description": "Submit the client-signed PSBT of a prepared operation. rgb-lib finalizes and broadcasts it. Retrying with the same `Idempotency-Key` returns the stored outcome. A 502 `COMPLETE_AMBIGUOUS` means the transaction may already be on the network: don't treat it as a failure. Read the operation instead; the gateway finishes the bookkeeping itself. rgb-lib also posts the consignment to the transport endpoints.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Broadcast and recorded.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "txid": {
+                      "type": "string",
+                      "description": "The broadcast transaction."
+                    },
+                    "batchTransferIdx": {
+                      "type": [
+                        "null",
+                        "integer"
+                      ],
+                      "description": "Batch index of the transfer this created, which rgb-lib refreshes, fails and deletes it by."
+                    }
+                  },
+                  "required": [
+                    "txid",
+                    "batchTransferIdx"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `PSBT_MISMATCH`: The signed PSBT is a different transaction from the one this operation prepared.\n- `PSBT_REJECTED`: rgb-lib rejected the signed PSBT (bad signature or tampering). It was not broadcast.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).\n- `OP_NOT_FOUND`: No such operation for this user. Another user's operation reads the same.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.\n- `OP_KIND_MISMATCH`: The operation was prepared by a different flow.\n- `OP_ALREADY_COMPLETED`: The operation was already completed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "- `OP_EXPIRED`: The operation passed `expiresAt`; prepare again.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `COMPLETE_AMBIGUOUS`: The wallet failed after the transaction may have been broadcast. The operation stays pending with its txid recorded; read it with `GET /v1/onchain/operations/{opId}` instead of assuming the send failed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/create-utxos/prepare": {
+      "post": {
+        "operationId": "prepareCreateUtxos",
+        "summary": "Prepare colorable UTXOs",
+        "description": "Builds an unsigned PSBT that creates `num` UTXOs of `size` sats on the colored keychain, paid from the vanilla wallet. RGB allocations need them. Every field is optional, but the body is not: send `{}` for the defaults.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "num": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "UTXOs to create. Default 5."
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 294,
+                    "description": "Sats per UTXO. Default 1000."
+                  },
+                  "upTo": {
+                    "type": "boolean",
+                    "description": "Create only as many as needed to reach `num` free colorable UTXOs. Default false."
+                  },
+                  "feeRateSatPerVb": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Fee rate in sat/vB. Default 2."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Prepared.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreparedOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/create-utxos/complete": {
+      "post": {
+        "operationId": "completeCreateUtxos",
+        "summary": "Broadcast a signed create-utxos",
+        "description": "Submit the client-signed PSBT of a prepared operation. rgb-lib finalizes and broadcasts it. Retrying with the same `Idempotency-Key` returns the stored outcome. A 502 `COMPLETE_AMBIGUOUS` means the transaction may already be on the network: don't treat it as a failure. Read the operation instead; the gateway finishes the bookkeeping itself.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Broadcast and recorded.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "txid": {
+                      "type": [
+                        "null",
+                        "string"
+                      ],
+                      "description": "The broadcast transaction."
+                    },
+                    "utxosCreated": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "txid",
+                    "utxosCreated"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `PSBT_MISMATCH`: The signed PSBT is a different transaction from the one this operation prepared.\n- `PSBT_REJECTED`: rgb-lib rejected the signed PSBT (bad signature or tampering). It was not broadcast.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `WALLET_NOT_REGISTERED`: This user has no registered xpubs yet (`POST /v1/wallet/xpubs`).\n- `OP_NOT_FOUND`: No such operation for this user. Another user's operation reads the same.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "- `IDEMPOTENCY_KEY_REUSED`: This key was already used for a different request.\n- `IDEMPOTENCY_IN_FLIGHT`: A request with this key is still running.\n- `OP_KIND_MISMATCH`: The operation was prepared by a different flow.\n- `OP_ALREADY_COMPLETED`: The operation was already completed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "- `OP_EXPIRED`: The operation passed `expiresAt`; prepare again.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "x-idempotent-replay": {
+                "$ref": "#/components/headers/IdempotentReplay"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "- `QUEUE_FULL`: Too many of this user's requests are queued or running. Retry after `retry-after` seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "retry-after": {
+                "$ref": "#/components/headers/RetryAfter"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `COMPLETE_AMBIGUOUS`: The wallet failed after the transaction may have been broadcast. The operation stays pending with its txid recorded; read it with `GET /v1/onchain/operations/{opId}` instead of assuming the send failed.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/operations/{opId}": {
+      "get": {
+        "operationId": "getOnchainOperation",
+        "summary": "Read a prepared operation",
+        "description": "The durable record of a prepared operation, for a client that lost the outcome of `complete`. Takes no `Idempotency-Key` and doesn't wait behind the user's queued wallet work, so it answers while a `complete` is still running. It never returns the PSBT.\n\n| `state` | `mayHaveBroadcast` | Meaning |\n| --- | --- | --- |\n| `completed` | `false` | Done; `txid` is final. |\n| `pending` | `false` | Prepared, never broadcast: sign and complete it, or let it expire. |\n| `pending` | `true` | The transaction may be on the network. The gateway finishes the bookkeeping itself; poll until `completed`. |\n| `expired` | `false` | Expired without being broadcast; prepare again. |\n| `expired` | `true` | Past `expiresAt` while ambiguous. The gateway still finishes it. |",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "opId",
+            "in": "path",
+            "required": true,
+            "description": "Operation id (a UUID) returned by prepare.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f-]{36}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The operation.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "opId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f-]{36}$",
+                      "description": "Operation id (a UUID) returned by prepare."
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "send_btc",
+                        "send_asset",
+                        "create_utxos"
+                      ]
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "completed",
+                        "expired"
+                      ],
+                      "description": "`expired` is reported for a pending op past `expiresAt`."
+                    },
+                    "txid": {
+                      "type": [
+                        "null",
+                        "string"
+                      ],
+                      "description": "Final txid once completed; the txid that may have broadcast while ambiguous; otherwise null."
+                    },
+                    "mayHaveBroadcast": {
+                      "type": "boolean",
+                      "description": "True when the op is not completed but a txid is recorded: its transaction may already be on the network."
+                    },
+                    "intent": {
+                      "$ref": "#/components/schemas/OnchainIntent"
+                    },
+                    "createdAt": {
+                      "type": "integer",
+                      "description": "Unix milliseconds."
+                    },
+                    "expiresAt": {
+                      "type": "integer",
+                      "description": "Unix milliseconds."
+                    }
+                  },
+                  "required": [
+                    "opId",
+                    "kind",
+                    "state",
+                    "txid",
+                    "mayHaveBroadcast",
+                    "intent",
+                    "createdAt",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "- `OP_NOT_FOUND`: No such operation for this user. Another user's operation reads the same.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/onchain/fee-estimate": {
+      "get": {
+        "operationId": "getFeeEstimate",
+        "summary": "Fee-rate estimate",
+        "description": "A fee rate from the gateway's indexer, which clients cannot reach themselves. It is rounded up to a whole sat/vB in the range the prepare routes accept. Cached for 30 seconds. It needs no registered wallet and doesn't wait behind the user's queued wallet work.",
+        "tags": [
+          "On-chain"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "blocks",
+            "in": "query",
+            "required": false,
+            "description": "Confirmation target in blocks. Default 6.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1008
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The estimate.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "blocks": {
+                      "type": "integer",
+                      "description": "The requested target."
+                    },
+                    "feeRateSatPerVb": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 1000,
+                      "description": "Whole sat/vB, rounded up. Can be passed straight to a prepare route."
+                    },
+                    "sourceBlocks": {
+                      "type": "integer",
+                      "description": "Target the estimate was read from: the nearest one the indexer publishes at or below `blocks`."
+                    }
+                  },
+                  "required": [
+                    "blocks",
+                    "feeRateSatPerVb",
+                    "sourceBlocks"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "- `UNAUTHORIZED`: Missing, malformed or unknown bearer token.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "- `INTERNAL`: Unexpected failure, such as rgb-node-api being unreachable or timing out on a route with no more specific code. The detail is logged under `x-request-id`.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "- `FEE_ESTIMATE_UNAVAILABLE`: The indexer gave no usable fee estimate.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "- `UPSTREAM_TIMEOUT`: The indexer did not answer the fee-estimate request within 10 seconds.",
+            "headers": {
+              "x-request-id": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorBody": {
+        "type": "object",
+        "description": "Every error the gateway raises. Clients branch on `code`; `message` is for humans and may change.",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable, machine-readable error code."
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable explanation."
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Balance": {
+        "type": "object",
+        "description": "rgb-lib balance triple: sats for BTC, asset units for an RGB asset.",
+        "properties": {
+          "settled": {
+            "type": "number",
+            "description": "Confirmed balance."
+          },
+          "future": {
+            "type": "number",
+            "description": "Balance once pending transfers settle."
+          },
+          "spendable": {
+            "type": "number",
+            "description": "Balance that can be spent now."
+          }
+        },
+        "required": [
+          "settled",
+          "future",
+          "spendable"
+        ],
+        "additionalProperties": false
+      },
+      "Assignment": {
+        "type": "object",
+        "description": "An rgb-lib assignment: its variant name plus its fungible amount.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "rgb-lib Assignment variant, verbatim: `Fungible`, `Any`, `InflationRight`, `NonFungible`, ..."
+          },
+          "amount": {
+            "type": [
+              "null",
+              "integer"
+            ],
+            "description": "Fungible amount; null for a variant that carries none."
+          }
+        },
+        "required": [
+          "kind",
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "OnchainIntent": {
+        "type": "object",
+        "description": "What the client checks the PSBT against before signing. Built from the request and the gateway's config, never read back from the PSBT.",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "send_btc",
+              "send_asset",
+              "create_utxos"
+            ]
+          },
+          "feeRateSatPerVb": {
+            "type": "integer",
+            "description": "Fee rate the PSBT was built with."
+          },
+          "recipients": {
+            "type": "array",
+            "description": "BTC payments: one for send-btc, none otherwise.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "scriptHex": {
+                  "type": "string",
+                  "description": "Output script the address decodes to, hex."
+                },
+                "amountSat": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "address",
+                "scriptHex",
+                "amountSat"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "asset": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "description": "The RGB payment of a send-asset; null otherwise.",
+            "properties": {
+              "assetId": {
+                "type": "string"
+              },
+              "amount": {
+                "type": "integer",
+                "description": "Asset units."
+              },
+              "recipientId": {
+                "type": "string"
+              },
+              "witnessAmountSat": {
+                "type": [
+                  "null",
+                  "integer"
+                ],
+                "description": "Sats on the witness output; null for a blinded recipient."
+              },
+              "transportEndpoints": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Consignment endpoints the transfer is posted to."
+              }
+            },
+            "required": [
+              "assetId",
+              "amount",
+              "recipientId",
+              "witnessAmountSat",
+              "transportEndpoints"
+            ],
+            "additionalProperties": false
+          },
+          "utxos": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "description": "The UTXOs a create-utxos makes; null otherwise.",
+            "properties": {
+              "upTo": {
+                "type": "boolean"
+              },
+              "num": {
+                "type": "integer"
+              },
+              "size": {
+                "type": "integer",
+                "description": "Sats per UTXO."
+              }
+            },
+            "required": [
+              "upTo",
+              "num",
+              "size"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "kind",
+          "feeRateSatPerVb",
+          "recipients",
+          "asset",
+          "utxos"
+        ],
+        "additionalProperties": false
+      },
+      "PreparedOperation": {
+        "type": "object",
+        "properties": {
+          "opId": {
+            "type": "string",
+            "pattern": "^[0-9a-f-]{36}$",
+            "description": "Operation id (a UUID) returned by prepare."
+          },
+          "psbt": {
+            "type": "string",
+            "description": "Unsigned PSBT, base64. Check it against `intent`."
+          },
+          "intent": {
+            "$ref": "#/components/schemas/OnchainIntent"
+          },
+          "expiresAt": {
+            "type": "integer",
+            "description": "Unix milliseconds. Completing after this fails with 410 `OP_EXPIRED`."
+          }
+        },
+        "required": [
+          "opId",
+          "psbt",
+          "intent",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "CompleteRequest": {
+        "type": "object",
+        "properties": {
+          "opId": {
+            "type": "string",
+            "pattern": "^[0-9a-f-]{36}$",
+            "description": "Operation id (a UUID) returned by prepare."
+          },
+          "signedPsbt": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9+/=]+$",
+            "minLength": 20,
+            "description": "The prepared PSBT with the client's signatures, base64. Same txid as prepared."
+          }
+        },
+        "required": [
+          "opId",
+          "signedPsbt"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Client-chosen key for one logical operation, scoped to the user. Reuse it only to retry the same request.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "Random id of this request; the gateway logs error details under it.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying.",
+        "schema": {
+          "type": "integer"
+        }
+      },
+      "IdempotentReplay": {
+        "description": "Present, as `true`, when this is a stored response being replayed.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "true"
+          ]
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The user's token from `POST /v1/users`."
+      },
+      "operatorToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-operator-token",
+        "description": "The `GATEWAY_OPERATOR_TOKEN`. Guards user creation only."
+      }
+    }
+  }
+}

@@ -6,21 +6,33 @@ import { errorBodySchema } from './index.js';
 
 /** Base64 PSBT; the body limit (64KB) bounds overall size. */
 const psbtSchema = { type: 'string', pattern: '^[A-Za-z0-9+/=]+$', minLength: 20 } as const;
-const opIdSchema = { type: 'string', pattern: '^[0-9a-f-]{36}$' } as const;
+const opIdSchema = {
+  type: 'string',
+  pattern: '^[0-9a-f-]{36}$',
+  description: 'Operation id (a UUID) returned by prepare.',
+} as const;
 const feeRateSchema = { type: 'integer', minimum: 1, maximum: 1000 } as const;
+/** Request-side fee rate: optional on every prepare route. */
+const feeRateRequestSchema = {
+  ...feeRateSchema,
+  description: 'Fee rate in sat/vB. Default 2.',
+} as const;
 
-const intentSchema = {
+export const intentSchema = {
   type: 'object',
+  description:
+    "What the client checks the PSBT against before signing. Built from the request and the gateway's config, never read back from the PSBT.",
   properties: {
     kind: { type: 'string', enum: ['send_btc', 'send_asset', 'create_utxos'] },
-    feeRateSatPerVb: { type: 'integer' },
+    feeRateSatPerVb: { type: 'integer', description: 'Fee rate the PSBT was built with.' },
     recipients: {
       type: 'array',
+      description: 'BTC payments: one for send-btc, none otherwise.',
       items: {
         type: 'object',
         properties: {
           address: { type: 'string' },
-          scriptHex: { type: 'string' },
+          scriptHex: { type: 'string', description: 'Output script the address decodes to, hex.' },
           amountSat: { type: 'integer' },
         },
         required: ['address', 'scriptHex', 'amountSat'],
@@ -29,22 +41,31 @@ const intentSchema = {
     },
     asset: {
       type: ['object', 'null'],
+      description: 'The RGB payment of a send-asset; null otherwise.',
       properties: {
         assetId: { type: 'string' },
-        amount: { type: 'integer' },
+        amount: { type: 'integer', description: 'Asset units.' },
         recipientId: { type: 'string' },
-        witnessAmountSat: { type: ['integer', 'null'] },
-        transportEndpoints: { type: 'array', items: { type: 'string' } },
+        witnessAmountSat: {
+          type: ['integer', 'null'],
+          description: 'Sats on the witness output; null for a blinded recipient.',
+        },
+        transportEndpoints: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Consignment endpoints the transfer is posted to.',
+        },
       },
       required: ['assetId', 'amount', 'recipientId', 'witnessAmountSat', 'transportEndpoints'],
       additionalProperties: false,
     },
     utxos: {
       type: ['object', 'null'],
+      description: 'The UTXOs a create-utxos makes; null otherwise.',
       properties: {
         upTo: { type: 'boolean' },
         num: { type: 'integer' },
-        size: { type: 'integer' },
+        size: { type: 'integer', description: 'Sats per UTXO.' },
       },
       required: ['upTo', 'num', 'size'],
       additionalProperties: false,
@@ -54,23 +75,29 @@ const intentSchema = {
   additionalProperties: false,
 } as const;
 
-const preparedResponseSchema = {
+export const preparedResponseSchema = {
   type: 'object',
   properties: {
     opId: opIdSchema,
-    psbt: { type: 'string' },
+    psbt: { type: 'string', description: 'Unsigned PSBT, base64. Check it against `intent`.' },
     intent: intentSchema,
-    expiresAt: { type: 'integer' },
+    expiresAt: {
+      type: 'integer',
+      description: 'Unix milliseconds. Completing after this fails with 410 `OP_EXPIRED`.',
+    },
   },
   required: ['opId', 'psbt', 'intent', 'expiresAt'],
   additionalProperties: false,
 } as const;
 
-const completeBodySchema = {
+export const completeBodySchema = {
   type: 'object',
   properties: {
     opId: opIdSchema,
-    signedPsbt: psbtSchema,
+    signedPsbt: {
+      ...psbtSchema,
+      description: "The prepared PSBT with the client's signatures, base64. Same txid as prepared.",
+    },
   },
   required: ['opId', 'signedPsbt'],
   additionalProperties: false,
@@ -109,12 +136,24 @@ export const operationGetRouteSchema = {
       properties: {
         opId: opIdSchema,
         kind: { type: 'string', enum: ['send_btc', 'send_asset', 'create_utxos'] },
-        state: { type: 'string', enum: ['pending', 'completed', 'expired'] },
-        txid: { type: ['string', 'null'] },
-        mayHaveBroadcast: { type: 'boolean' },
+        state: {
+          type: 'string',
+          enum: ['pending', 'completed', 'expired'],
+          description: '`expired` is reported for a pending op past `expiresAt`.',
+        },
+        txid: {
+          type: ['string', 'null'],
+          description:
+            'Final txid once completed; the txid that may have broadcast while ambiguous; otherwise null.',
+        },
+        mayHaveBroadcast: {
+          type: 'boolean',
+          description:
+            'True when the op is not completed but a txid is recorded: its transaction may already be on the network.',
+        },
         intent: intentSchema,
-        createdAt: { type: 'integer' },
-        expiresAt: { type: 'integer' },
+        createdAt: { type: 'integer', description: 'Unix milliseconds.' },
+        expiresAt: { type: 'integer', description: 'Unix milliseconds.' },
       },
       required: [
         'opId',
@@ -144,7 +183,12 @@ export const feeEstimateRouteSchema = {
     type: 'object',
     properties: {
       // 1008 is the widest target esplora publishes.
-      blocks: { type: 'integer', minimum: 1, maximum: 1008 },
+      blocks: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 1008,
+        description: 'Confirmation target in blocks. Default 6.',
+      },
     },
     additionalProperties: false,
   },
@@ -152,10 +196,16 @@ export const feeEstimateRouteSchema = {
     200: {
       type: 'object',
       properties: {
-        blocks: { type: 'integer' },
-        feeRateSatPerVb: feeRateSchema,
-        /** Esplora ladder target the estimate was read from (≤ `blocks`). */
-        sourceBlocks: { type: 'integer' },
+        blocks: { type: 'integer', description: 'The requested target.' },
+        feeRateSatPerVb: {
+          ...feeRateSchema,
+          description: 'Whole sat/vB, rounded up. Can be passed straight to a prepare route.',
+        },
+        sourceBlocks: {
+          type: 'integer',
+          description:
+            'Target the estimate was read from: the nearest one the indexer publishes at or below `blocks`.',
+        },
       },
       required: ['blocks', 'feeRateSatPerVb', 'sourceBlocks'],
       additionalProperties: false,
@@ -171,9 +221,13 @@ export const sendBtcPrepareRouteSchema = {
   body: {
     type: 'object',
     properties: {
-      address: { type: 'string', pattern: '^[a-zA-Z0-9]{14,90}$' },
+      address: {
+        type: 'string',
+        pattern: '^[a-zA-Z0-9]{14,90}$',
+        description: "Recipient address on the gateway's network.",
+      },
       amountSat: { type: 'integer', minimum: 294 },
-      feeRateSatPerVb: feeRateSchema,
+      feeRateSatPerVb: feeRateRequestSchema,
     },
     required: ['address', 'amountSat'],
     additionalProperties: false,
@@ -186,7 +240,7 @@ export const sendBtcCompleteRouteSchema = {
   response: {
     200: {
       type: 'object',
-      properties: { txid: { type: 'string' } },
+      properties: { txid: { type: 'string', description: 'The broadcast transaction.' } },
       required: ['txid'],
       additionalProperties: false,
     },
@@ -202,18 +256,37 @@ export const sendAssetPrepareRouteSchema = {
       // Integer, not number: an RGB fungible amount is a u64 on the rgb-lib
       // side, and a fractional one fails serde deserialization there — a 500
       // for what is really a malformed request.
-      amount: { type: 'integer', minimum: 1 },
-      recipientId: { type: 'string', minLength: 1 },
-      witnessAmountSat: { type: 'integer', minimum: 294 },
+      amount: { type: 'integer', minimum: 1, description: 'Asset units.' },
+      recipientId: {
+        type: 'string',
+        minLength: 1,
+        description: "Recipient id from the recipient's invoice (blinded UTXO or witness).",
+      },
+      witnessAmountSat: {
+        type: 'integer',
+        minimum: 294,
+        description: 'Sats for the witness output. Give it for a witness recipient only.',
+      },
       transportEndpoints: {
         type: 'array',
         items: { type: 'string', minLength: 1 },
         minItems: 1,
         maxItems: 4,
+        description:
+          "Consignment endpoints, each on the operator's allowlist. Default: the gateway's `RGB_PROXY_URL`.",
       },
-      donation: { type: 'boolean' },
-      minConfirmations: { type: 'integer', minimum: 0, maximum: 100 },
-      feeRateSatPerVb: feeRateSchema,
+      donation: {
+        type: 'boolean',
+        description:
+          "rgb-lib donation: don't wait for the recipient's acknowledgement. Default false.",
+      },
+      minConfirmations: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 100,
+        description: 'Confirmations required on the spent inputs. Default 1.',
+      },
+      feeRateSatPerVb: feeRateRequestSchema,
     },
     required: ['assetId', 'amount', 'recipientId'],
     additionalProperties: false,
@@ -227,13 +300,17 @@ export const sendAssetCompleteRouteSchema = {
     200: {
       type: 'object',
       properties: {
-        txid: { type: 'string' },
+        txid: { type: 'string', description: 'The broadcast transaction.' },
         /**
          * rgb-lib's batch transfer index for the transfer this created. refresh,
          * fail and delete address a transfer by this, not by its txid, so a
          * client cannot manage what it just sent without it.
          */
-        batchTransferIdx: { type: ['integer', 'null'] },
+        batchTransferIdx: {
+          type: ['integer', 'null'],
+          description:
+            'Batch index of the transfer this created, which rgb-lib refreshes, fails and deletes it by.',
+        },
       },
       required: ['txid', 'batchTransferIdx'],
       additionalProperties: false,
@@ -246,10 +323,14 @@ export const createUtxosPrepareRouteSchema = {
   body: {
     type: 'object',
     properties: {
-      num: { type: 'integer', minimum: 1, maximum: 50 },
-      size: { type: 'integer', minimum: 294 },
-      upTo: { type: 'boolean' },
-      feeRateSatPerVb: feeRateSchema,
+      num: { type: 'integer', minimum: 1, maximum: 50, description: 'UTXOs to create. Default 5.' },
+      size: { type: 'integer', minimum: 294, description: 'Sats per UTXO. Default 1000.' },
+      upTo: {
+        type: 'boolean',
+        description:
+          'Create only as many as needed to reach `num` free colorable UTXOs. Default false.',
+      },
+      feeRateSatPerVb: feeRateRequestSchema,
     },
     additionalProperties: false,
   },
@@ -262,7 +343,7 @@ export const createUtxosCompleteRouteSchema = {
     200: {
       type: 'object',
       properties: {
-        txid: { type: ['string', 'null'] },
+        txid: { type: ['string', 'null'], description: 'The broadcast transaction.' },
         utxosCreated: { type: 'integer' },
       },
       required: ['txid', 'utxosCreated'],

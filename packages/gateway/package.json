@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "openapi": "vitest run test/openapi.test.ts --update"
   },
   "dependencies": {
     "@scure/base": "^2.4.0",
