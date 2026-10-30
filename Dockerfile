@@ -13,23 +13,21 @@ COPY . .
 RUN pnpm build
 
 FROM workspace AS packaged
-RUN pnpm --filter @utexo/rln-gateway deploy --prod --legacy /out \
+RUN pnpm --filter @utexo/lightsdk-gateway --fail-if-no-match deploy --prod --legacy /out \
     && mkdir -p /out/dist \
     && cp -a packages/gateway/dist/. /out/dist/
 
 FROM node:22-bookworm-slim AS runtime
-# Native rgb-lib HTTPS clients need the system trust store, not Node's bundled CAs.
+# Keep the system trust store available in the runtime image.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && test -s /etc/ssl/certs/ca-certificates.crt
-LABEL org.opencontainers.image.source="https://github.com/UTEXO-Protocol/rln-gateway"
+LABEL org.opencontainers.image.source="https://github.com/UTEXO-Protocol/lightsdk-gateway"
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=packaged /out ./
-# The native addon embeds its build-time library path, which pnpm deploy relocates.
-RUN find node_modules -name librgblibcffi.so -exec cp {} /usr/local/lib/ \; \
-    && ldconfig \
-    && node -e "require('@utexo/rgb-lib-linux-' + process.arch + '/rgblib'); new (require('better-sqlite3'))(':memory:').close()"
+# Verify the native SQLite dependency after relocating the production package.
+RUN node -e "new (require('better-sqlite3'))(':memory:').close()"
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
     CMD node -e "fetch('http://127.0.0.1:'+(process.env.GATEWAY_PORT||8480)+'/v1/health',{signal:AbortSignal.timeout(4000)}).then(async r=>{if(!r.ok||(await r.json()).status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"
 CMD ["node", "dist/main.js"]
