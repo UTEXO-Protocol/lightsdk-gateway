@@ -6,12 +6,14 @@
 
 export const errorBodySchema = {
   type: 'object',
+  description:
+    'Every error the gateway raises. Clients branch on `code`; `message` is for humans and may change.',
   properties: {
     error: {
       type: 'object',
       properties: {
-        code: { type: 'string' },
-        message: { type: 'string' },
+        code: { type: 'string', description: 'Stable, machine-readable error code.' },
+        message: { type: 'string', description: 'Human-readable explanation.' },
       },
       required: ['code', 'message'],
       additionalProperties: false,
@@ -45,9 +47,13 @@ export const createUserRouteSchema = {
     201: {
       type: 'object',
       properties: {
-        userId: { type: 'string' },
-        token: { type: 'string' },
-        createdAt: { type: 'integer' },
+        userId: { type: 'string', description: 'Opaque user id (`u_` and 32 hex characters).' },
+        token: {
+          type: 'string',
+          description:
+            "The user's bearer token. Returned only here: the gateway stores just its hash.",
+        },
+        createdAt: { type: 'integer', description: 'Unix milliseconds.' },
       },
       required: ['userId', 'token', 'createdAt'],
       additionalProperties: false,
@@ -63,7 +69,7 @@ export const meRouteSchema = {
       type: 'object',
       properties: {
         userId: { type: 'string' },
-        createdAt: { type: 'integer' },
+        createdAt: { type: 'integer', description: 'Unix milliseconds.' },
       },
       required: ['userId', 'createdAt'],
       additionalProperties: false,

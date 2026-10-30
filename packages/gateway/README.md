@@ -36,11 +36,21 @@ stored.
 
 ## API
 
+The full reference is [`openapi.json`](openapi.json) (OpenAPI 3.1): every route's request
+and response schema, and every error code it can return. It is generated from the route
+schemas, so regenerate it after changing a route or schema with
+`pnpm --filter @utexo/lightsdk-gateway openapi`; `pnpm test` fails while it is stale.
+
 Auth is one of: the operator token (`x-operator-token` header), the user's bearer token
 (`Authorization: Bearer <token>`), or none. Money-moving routes additionally require an
-`Idempotency-Key` header (400 without it): a replay of the same key **and** the same
-request body returns the stored response, and completed rows are garbage-collected after
-7 days.
+`Idempotency-Key` header of 1–128 characters, scoped to the user (400
+`IDEMPOTENCY_KEY_REQUIRED` without it): a replay of the same key **and** the same request
+(method, route and body) returns the stored response, error responses included, with an
+`x-idempotent-replay: true` header. Completed rows are garbage-collected after 7 days.
+
+Request bodies are JSON of at most 64 KiB. Unknown fields in a body or query string are
+removed before the request is processed, not rejected. A route that takes a body needs
+one even when every field is optional: send `{}`.
 
 Two details matter for retries. Responses with status ≥ 500 or 429 are deliberately
 **not** cached — the claim is released so the request can be retried — and an in-flight
@@ -80,7 +90,9 @@ and nowhere else, so it is the handle to quote when asking an operator about a
 
 ### Errors
 
-Every error response is `{"error": {"code", "message"}}`. Notable codes:
+Every error the gateway raises is `{"error": {"code", "message"}}`; a path it does not
+serve answers Fastify's default 404 body instead. Notable codes (`openapi.json` lists all
+of them, per route):
 
 | Code                              | Status | Meaning                                                                                                                                                                                                                                        |
 | --------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -149,7 +161,9 @@ publish resolves to the nearest published target **at or below** it (the more ur
 never cheaper, neighbour) — which `sourceBlocks` reports. The answer is cached for 30s, so
 a burst of clients is one indexer call. It needs no `Idempotency-Key`, no registered
 wallet, and is not queued behind the per-user wallet work: a client needs a fee rate
-_before_ it can prepare anything.
+_before_ it can prepare anything. An indexer that gives no usable estimate answers 502
+`FEE_ESTIMATE_UNAVAILABLE`; one that does not answer within 10 seconds, 504
+`UPSTREAM_TIMEOUT`.
 
 ## Recovering a lost on-chain completion
 
@@ -177,6 +191,7 @@ How to read it:
 | `completed` | `false`            | Done; `txid` is final                             | nothing                                                                                 |
 | `pending`   | `false`            | Prepared, never broadcast                         | sign and `complete`, or let it expire                                                   |
 | `pending`   | `true`             | **The transaction may already be on the network** | nothing — **the gateway finishes this itself** (below); poll until it reads `completed` |
+| `expired`   | `false`            | Past TTL, never broadcast                         | prepare again                                                                           |
 | `expired`   | `true`             | Past TTL while ambiguous                          | same: the gateway still finishes it, and completion is not blocked by the TTL           |
 
 Three properties worth relying on. It takes **no** `Idempotency-Key` and is not queued

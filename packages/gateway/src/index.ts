@@ -26,6 +26,7 @@ export {
 } from './idempotency.js';
 export { HttpError } from './errors.js';
 export { buildServer, type BuildServerOptions, type RouteSchemaEntry } from './server.js';
+export { buildOpenApiDocument, ERROR_CODES, type ErrorCode } from './openapi.js';
 export {
   findKeyMaterialFields,
   findKeyMaterialInValue,
