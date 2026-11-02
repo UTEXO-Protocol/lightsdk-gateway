@@ -1465,6 +1465,13 @@
                       ],
                       "description": "Batch index of the created receive, which rgb-lib refreshes, fails and deletes it by."
                     },
+                    "publicKey": {
+                      "type": [
+                        "null",
+                        "string"
+                      ],
+                      "description": "The receiver's Ed25519 key (hex), also the invoice's `pk`: a sender passes it as `recipientPublicKey`. Null from a wallet service older than RGB proxy protocol 1.0."
+                    },
                     "mode": {
                       "type": "string",
                       "enum": [
@@ -1478,6 +1485,7 @@
                     "recipientId",
                     "expirationTimestamp",
                     "batchTransferIdx",
+                    "publicKey",
                     "mode"
                   ],
                   "additionalProperties": false
@@ -2091,7 +2099,7 @@
       "post": {
         "operationId": "prepareSendAsset",
         "summary": "Prepare an RGB asset send",
-        "description": "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it.",
+        "description": "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
         "tags": [
           "On-chain"
         ],
@@ -2141,6 +2149,25 @@
                     "maxItems": 4,
                     "description": "Consignment endpoints, each on the operator's allowlist. Default: the gateway's `RGB_PROXY_URL`."
                   },
+                  "recipientPublicKey": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "The recipient invoice's `pk` (Ed25519, 32 bytes as lowercase hex). Required by an RGB proxy protocol 1.0 wallet service."
+                  },
+                  "recipientExpirationTimestamp": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The recipient invoice's `expiry`, unix seconds."
+                  },
+                  "recipientEncryption": {
+                    "type": "string",
+                    "enum": [
+                      "required",
+                      "optional",
+                      "unsupported"
+                    ],
+                    "description": "The recipient invoice's `enc`: absent is `required`, `1` is `optional`, `0` is `unsupported`. Omit it when the invoice has none."
+                  },
                   "donation": {
                     "type": "boolean",
                     "description": "rgb-lib donation: don't wait for the recipient's acknowledgement. Default false."
@@ -2188,7 +2215,7 @@
             }
           },
           "400": {
-            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `TRANSPORT_ENDPOINT_NOT_ALLOWED`: A transport endpoint is not on the operator's allowlist (SSRF guard).\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
+            "description": "- `BAD_REQUEST`: The body, query string or path parameters failed validation; `message` names the field.\n- `IDEMPOTENCY_KEY_REQUIRED`: No `Idempotency-Key` header, or one longer than 128 characters.\n- `TRANSPORT_ENDPOINT_NOT_ALLOWED`: A transport endpoint is not on the operator's allowlist (SSRF guard).\n- `WALLET_REQUEST_REJECTED`: rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.\n- `INVALID_RECIPIENT_PUBLIC_KEY`: The wallet service needs the recipient invoice's `pk` (RGB proxy protocol 1.0) and it was missing or invalid: pass it as `recipientPublicKey`.\n- `INSUFFICIENT_FUNDS`: Not enough confirmed bitcoins, assets or allocation slots.",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"
@@ -3324,6 +3351,33 @@
                   "type": "string"
                 },
                 "description": "Consignment endpoints the transfer is posted to."
+              },
+              "recipientPublicKey": {
+                "type": [
+                  "null",
+                  "string"
+                ],
+                "description": "The recipient invoice's `pk` the consignment is encrypted to, as sent; null when not given."
+              },
+              "recipientExpirationTimestamp": {
+                "type": [
+                  "null",
+                  "integer"
+                ],
+                "description": "The recipient invoice's `expiry`, as sent; null when not given."
+              },
+              "recipientEncryption": {
+                "type": [
+                  "null",
+                  "string"
+                ],
+                "enum": [
+                  "required",
+                  "optional",
+                  "unsupported",
+                  null
+                ],
+                "description": "The recipient invoice's `enc`, as sent; null when not given."
               }
             },
             "required": [
@@ -3331,7 +3385,10 @@
               "amount",
               "recipientId",
               "witnessAmountSat",
-              "transportEndpoints"
+              "transportEndpoints",
+              "recipientPublicKey",
+              "recipientExpirationTimestamp",
+              "recipientEncryption"
             ],
             "additionalProperties": false
           },

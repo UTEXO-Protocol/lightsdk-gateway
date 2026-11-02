@@ -31,6 +31,7 @@ export {
   type IntentRecipient,
   type IntentUtxos,
   type OnchainIntent,
+  type RecipientEncryption,
   type VerifyParams,
   type VerifyVerdict,
 } from './verify.js';

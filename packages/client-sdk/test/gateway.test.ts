@@ -396,6 +396,78 @@ describe('prepare responses are bound to the request', () => {
     );
   });
 
+  it("rejects a send-asset intent that changes the recipient invoice's pk, expiry or enc", async () => {
+    const PK = 'bd'.repeat(32);
+    const recipient = {
+      recipientPublicKey: PK,
+      recipientExpirationTimestamp: 1_793_723_445,
+      recipientEncryption: 'optional' as const,
+    };
+    const base = {
+      opId: 'op-3',
+      psbt: 'cHNidP8=',
+      expiresAt: 1,
+      intent: {
+        kind: 'send_asset',
+        feeRateSatPerVb: 2,
+        recipients: [],
+        asset: {
+          assetId: 'rgb:good',
+          amount: 10,
+          recipientId: 'sb:wvout:me',
+          witnessAmountSat: null,
+          transportEndpoints: ['http://proxy'],
+          ...recipient,
+        },
+        utxos: null,
+      },
+    };
+    const request = { assetId: 'rgb:good', amount: 10, recipientId: 'sb:wvout:me', ...recipient };
+    await expect(client(base).prepareSendAsset(request)).resolves.toMatchObject({ opId: 'op-3' });
+
+    for (const patch of [
+      // Encrypted to a key the caller never gave: someone else reads the transfer.
+      { recipientPublicKey: 'ee'.repeat(32) },
+      { recipientPublicKey: null },
+      { recipientExpirationTimestamp: 1 },
+      { recipientEncryption: 'unsupported' },
+    ]) {
+      const tampered = {
+        ...base,
+        intent: { ...base.intent, asset: { ...base.intent.asset, ...patch } },
+      };
+      await expect(client(tampered).prepareSendAsset(request)).rejects.toThrow(IntentMismatchError);
+    }
+
+    // A key the caller did not send must not appear either.
+    const { recipientPublicKey: _pk, ...withoutKey } = request;
+    await expect(client(base).prepareSendAsset(withoutKey)).rejects.toThrow(IntentMismatchError);
+  });
+
+  it('accepts an older gateway that echoes no recipient key fields when none were sent', async () => {
+    const legacy = {
+      opId: 'op-4',
+      psbt: 'cHNidP8=',
+      expiresAt: 1,
+      intent: {
+        kind: 'send_asset',
+        feeRateSatPerVb: 2,
+        recipients: [],
+        asset: {
+          assetId: 'rgb:good',
+          amount: 10,
+          recipientId: 'utxob:me',
+          witnessAmountSat: null,
+          transportEndpoints: ['http://proxy'],
+        },
+        utxos: null,
+      },
+    };
+    await expect(
+      client(legacy).prepareSendAsset({ assetId: 'rgb:good', amount: 10, recipientId: 'utxob:me' }),
+    ).resolves.toMatchObject({ opId: 'op-4' });
+  });
+
   it('rejects a create-utxos intent that changes a pinned shape', async () => {
     const base = {
       opId: 'op-3',

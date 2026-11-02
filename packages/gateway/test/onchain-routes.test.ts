@@ -442,6 +442,9 @@ describe('on-chain prepare/complete routes', () => {
           recipientId: 'utxob:fixture-recipient',
           witnessAmountSat: null,
           transportEndpoints: [app.gatewayConfig.rgbProxyUrl],
+          recipientPublicKey: null,
+          recipientExpirationTimestamp: null,
+          recipientEncryption: null,
         },
         utxos: null,
       });
@@ -452,6 +455,10 @@ describe('on-chain prepare/complete routes', () => {
         donation: false,
         minConfirmations: 1,
         witnessAmountSat: null,
+        // Never defaulted: only the client holds the recipient's invoice.
+        recipientPublicKey: null,
+        recipientExpirationTimestamp: null,
+        recipientEncryption: null,
       });
       // The wallet-side pending transfer expires together with the op.
       expect(request!.expirationTimestamp).toBe(Math.floor(body.expiresAt / 1000));
@@ -467,6 +474,44 @@ describe('on-chain prepare/complete routes', () => {
         witnessAmountSat: 1000,
         transportEndpoints: [allowlisted],
       });
+    });
+
+    it("passes the recipient invoice's pk, expiry and enc through and echoes them", async () => {
+      const recipient = {
+        recipientPublicKey: 'bd92a92452c9c3fc2b4fa04e5e15fd922608b8e4ab6ba43a3c90c3cc866b791b',
+        recipientExpirationTimestamp: 1_793_723_445,
+        recipientEncryption: 'optional',
+      };
+      const response = await prepareSendAsset({ witnessAmountSat: 1000, ...recipient });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().intent.asset).toMatchObject(recipient);
+      expect(backend.handleFor(user.userId)?.lastSendAssetRequest).toMatchObject(recipient);
+    });
+
+    it.each([
+      ['uppercase hex', 'BD'.repeat(32)],
+      ['a short key', 'bd'.repeat(31)],
+      ['non-hex', 'zz'.repeat(32)],
+    ])('rejects a recipientPublicKey that is %s at the schema layer', async (_name, key) => {
+      const response = await prepareSendAsset({ recipientPublicKey: key });
+      expect(response.statusCode).toBe(400);
+      expect(backend.handleFor(user.userId)?.lastSendAssetRequest).toBeUndefined();
+    });
+
+    it('answers INVALID_RECIPIENT_PUBLIC_KEY when the wallet service needs the key', async () => {
+      await prepareSendAsset();
+      backend.handleFor(user.userId)!.failWith = new WalletBackendError(
+        'wallet sendAssetBegin failed',
+        'rgb-node-api /wallet/sendbegin -> 400 InvalidPubkey: missing recipient public key',
+        false,
+        true,
+        false,
+        false,
+        'InvalidPubkey',
+      );
+      const response = await prepareSendAsset();
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe('INVALID_RECIPIENT_PUBLIC_KEY');
     });
 
     it('rejects transport endpoints outside the operator allowlist (SSRF guard)', async () => {
@@ -555,6 +600,36 @@ describe('on-chain prepare/complete routes', () => {
         createdAt: expect.any(Number),
         expiresAt: prepared.expiresAt,
       });
+    });
+
+    it('serves a send-asset op stored before the recipient key fields existed', async () => {
+      const prepared = (
+        await app.inject({
+          method: 'POST',
+          url: '/v1/onchain/send-asset/prepare',
+          headers: headers(),
+          payload: { assetId: ASSET_ID, amount: 25, recipientId: 'utxob:fixture-recipient' },
+        })
+      ).json();
+      // Rewrite the stored intent the way an older gateway persisted it.
+      const { recipientPublicKey, recipientExpirationTimestamp, recipientEncryption, ...legacy } =
+        prepared.intent.asset;
+      app.db
+        .prepare('UPDATE pending_ops SET intent = ? WHERE id = ?')
+        .run(JSON.stringify({ ...prepared.intent, asset: legacy }), prepared.opId);
+      const response = await getOp(prepared.opId);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().intent.asset).toEqual({
+        ...legacy,
+        recipientPublicKey: null,
+        recipientExpirationTimestamp: null,
+        recipientEncryption: null,
+      });
+      expect([recipientPublicKey, recipientExpirationTimestamp, recipientEncryption]).toEqual([
+        null,
+        null,
+        null,
+      ]);
     });
 
     it('reports the final txid once the op completed', async () => {

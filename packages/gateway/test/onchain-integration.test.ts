@@ -198,7 +198,11 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('on-chain flows on regtest
 
     const receive = (await gateway('POST', '/v1/wallet/receive', { mode: 'blind' })) as {
       recipientId: string;
+      publicKey: string;
+      expirationTimestamp: number;
     };
+    // RGB proxy protocol 1.0: the consignment is encrypted to the receiver's key.
+    expect(receive.publicKey).toMatch(/^[0-9a-f]{64}$/);
     const sent = await cp.beginSignEnd<{ txid: string }>('send', {
       recipient_map: {
         [assetId]: [
@@ -207,6 +211,8 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('on-chain flows on regtest
             witness_data: null,
             amount: 100,
             transport_endpoints: [PROXY_URL],
+            public_key: receive.publicKey,
+            expiration_timestamp: receive.expirationTimestamp,
           },
         ],
       },
@@ -234,7 +240,11 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('on-chain flows on regtest
   }, 180_000);
 
   it('send-asset: prepare, sign client-side (colored keychain), complete, settle', async () => {
-    const back = await cp.call<{ recipient_id: string }>('blindreceive', {
+    const back = await cp.call<{
+      recipient_id: string;
+      public_key: string;
+      expiration_timestamp: number;
+    }>('blindreceive', {
       asset_id: assetId,
       duration_seconds: 3600,
     });
@@ -244,8 +254,15 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('on-chain flows on regtest
       amount: 40,
       recipientId: back.recipient_id,
       transportEndpoints: [PROXY_URL],
-    })) as { opId: string; psbt: string; intent: { asset: { amount: number } } };
+      recipientPublicKey: back.public_key,
+      recipientExpirationTimestamp: back.expiration_timestamp,
+    })) as {
+      opId: string;
+      psbt: string;
+      intent: { asset: { amount: number; recipientPublicKey: string | null } };
+    };
     expect(prepared.intent.asset.amount).toBe(40);
+    expect(prepared.intent.asset.recipientPublicKey).toBe(back.public_key);
 
     const signedPsbt = signPsbtWithMaster(master, prepared.psbt);
     const completed = (await gateway('POST', '/v1/onchain/send-asset/complete', {

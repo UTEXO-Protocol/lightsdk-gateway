@@ -18,6 +18,7 @@ import { recordOwnership } from '../scoping.js';
 import {
   WalletBackendError,
   walletHttpError,
+  type RecipientEncryption,
   type WalletHandle,
   type WalletIdentity,
 } from './backend.js';
@@ -38,6 +39,10 @@ export interface IntentAsset {
   recipientId: string;
   witnessAmountSat: number | null;
   transportEndpoints: string[];
+  /** The recipient invoice's `pk`, `expiry` and `enc` as sent; null when not given. */
+  recipientPublicKey: string | null;
+  recipientExpirationTimestamp: number | null;
+  recipientEncryption: RecipientEncryption | null;
 }
 
 export interface IntentUtxos {
@@ -112,6 +117,9 @@ export interface PrepareSendAssetParams {
   recipientId: string;
   witnessAmountSat?: number | undefined;
   transportEndpoints?: string[] | undefined;
+  recipientPublicKey?: string | undefined;
+  recipientExpirationTimestamp?: number | undefined;
+  recipientEncryption?: RecipientEncryption | undefined;
   donation?: boolean | undefined;
   minConfirmations?: number | undefined;
   feeRateSatPerVb?: number | undefined;
@@ -172,6 +180,25 @@ export function txidFromPsbt(psbtBase64: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * A persisted intent, read back. Ops prepared before the recipient key fields
+ * existed were stored without them; they read back as null (none was sent),
+ * which keeps the strict response schema's required keys satisfied.
+ */
+function storedIntent(json: string): OnchainIntent {
+  const intent = JSON.parse(json) as OnchainIntent;
+  if (intent.asset === null) return intent;
+  return {
+    ...intent,
+    asset: {
+      ...intent.asset,
+      recipientPublicKey: intent.asset.recipientPublicKey ?? null,
+      recipientExpirationTimestamp: intent.asset.recipientExpirationTimestamp ?? null,
+      recipientEncryption: intent.asset.recipientEncryption ?? null,
+    },
+  };
 }
 
 /**
@@ -297,6 +324,11 @@ export class OnchainService {
       );
     }
     const witnessAmountSat = params.witnessAmountSat ?? null;
+    // Passed through verbatim, never defaulted: they come from the recipient's
+    // invoice, which only the client holds.
+    const recipientPublicKey = params.recipientPublicKey ?? null;
+    const recipientExpirationTimestamp = params.recipientExpirationTimestamp ?? null;
+    const recipientEncryption = params.recipientEncryption ?? null;
     const expiresAtSeconds = Math.floor((now + this.config.onchainOpTtlSeconds * 1000) / 1000);
     const psbt = await this.run(identity, (wallet) =>
       wallet.sendAssetBegin({
@@ -305,6 +337,9 @@ export class OnchainService {
         amount: params.amount,
         witnessAmountSat,
         transportEndpoints,
+        recipientPublicKey,
+        recipientExpirationTimestamp,
+        recipientEncryption,
         donation: params.donation ?? false,
         feeRateSatPerVb,
         minConfirmations: params.minConfirmations ?? DEFAULT_MIN_CONFIRMATIONS,
@@ -322,6 +357,9 @@ export class OnchainService {
         recipientId: params.recipientId,
         witnessAmountSat,
         transportEndpoints,
+        recipientPublicKey,
+        recipientExpirationTimestamp,
+        recipientEncryption,
       },
       utxos: null,
     };
@@ -382,7 +420,7 @@ export class OnchainService {
       state,
       txid: row.txid,
       mayHaveBroadcast: row.txid !== null && state !== 'completed',
-      intent: JSON.parse(row.intent) as OnchainIntent,
+      intent: storedIntent(row.intent),
       createdAt: row.created_at,
       expiresAt: row.expires_at,
     };

@@ -35,10 +35,14 @@ services:
     depends_on:
       - bitcoind
 
-  # The image rgb-lib's own test suite runs against, so it speaks the proxy
-  # protocol version rgb-lib requires.
+  # The image rgb-lib-bfa's own test suite runs against: RGB proxy protocol
+  # 1.0, the exact version rgb-node-api main requires (0.3.0 speaks 0.2).
+  # Proof of work off, as in that suite, so the many transfers of a run do not
+  # each pay for it.
   proxy:
-    image: ghcr.io/rgb-tools/rgb-proxy-server:0.3.0
+    image: ghcr.io/rgb-tools/rgb-proxy-server:0.4.0
+    environment:
+      MAX_POW_DIFFICULTY: 0
 
   # Built from source on first start (takes several minutes). Point
   # RGB_NODE_API_CONTEXT at a local checkout or another git ref to test a

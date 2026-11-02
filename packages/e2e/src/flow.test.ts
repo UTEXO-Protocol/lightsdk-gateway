@@ -156,8 +156,21 @@ describe('lightweight-sdk e2e journey on regtest', () => {
   it('receives an RGB asset into the vault from the counterparty', async () => {
     const receive = await userA.client.receive({ mode: 'blind' });
     expect(receive.invoice.length).toBeGreaterThan(20);
+    // RGB proxy protocol 1.0: the gateway hands out the key the sender
+    // encrypts the consignment to, and the invoice carries the same one.
+    expect(receive.publicKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(receive.invoice).toContain(`pk=${receive.publicKey}`);
+    expect(receive.expirationTimestamp).not.toBeNull();
 
-    await harness.cp.sendAsset(harness.assetId, receive.recipientId, RGB_RECEIVE_UNITS);
+    await harness.cp.sendAsset(
+      harness.assetId,
+      {
+        recipientId: receive.recipientId,
+        publicKey: receive.publicKey!,
+        expirationTimestamp: receive.expirationTimestamp!,
+      },
+      RGB_RECEIVE_UNITS,
+    );
 
     // Settlement dance (donation=false): receiver ACKs via refresh, the
     // sender's refresh broadcasts, one confirmation settles both sides.
@@ -187,13 +200,15 @@ describe('lightweight-sdk e2e journey on regtest', () => {
     // COLORED spend: the opret commitment output, the colored-account key
     // origins and the RGB change output all have to satisfy verifyPsbt, which
     // hand-built fixtures cannot prove.
-    const recipientId = await harness.cp.blindReceive(harness.assetId);
+    const recipient = await harness.cp.blindReceive(harness.assetId);
 
     const prepared = await userA.client.prepareSendAsset(
       {
         assetId: harness.assetId,
         amount: RGB_SEND_BACK_UNITS,
-        recipientId,
+        recipientId: recipient.recipientId,
+        recipientPublicKey: recipient.publicKey,
+        recipientExpirationTimestamp: recipient.expirationTimestamp,
         feeRateSatPerVb: FEE_RATE,
       },
       generateIdempotencyKey(),

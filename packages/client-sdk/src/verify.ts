@@ -31,7 +31,17 @@ export interface IntentAsset {
   recipientId: string;
   witnessAmountSat: number | null;
   transportEndpoints: string[];
+  /**
+   * The recipient invoice's `pk`, `expiry` and `enc` as the gateway sent them
+   * (RGB proxy protocol 1.0); null when not given. Absent from older gateways.
+   */
+  recipientPublicKey?: string | null;
+  recipientExpirationTimestamp?: number | null;
+  recipientEncryption?: RecipientEncryption | null;
 }
+
+/** An RGB invoice's `enc`: absent is `required`, `1` is `optional`, `0` is `unsupported`. */
+export type RecipientEncryption = 'required' | 'optional' | 'unsupported';
 
 export interface IntentUtxos {
   upTo: boolean;
