@@ -118,7 +118,8 @@ export const ERROR_CODES = {
   },
   FEE_ESTIMATE_UNAVAILABLE: {
     status: 502,
-    meaning: 'The indexer gave no usable fee estimate.',
+    meaning:
+      'No usable fee estimate: the indexer had none, for example because its node has seen too few transactions to estimate (common on test networks), or the gateway has no indexer configured.',
   },
   UPSTREAM_TIMEOUT: {
     status: 504,

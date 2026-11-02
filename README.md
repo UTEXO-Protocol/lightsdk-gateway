@@ -21,7 +21,7 @@ browser / mobile app
   lightsdk-gateway  (per-user auth, per-user scoping + FIFO queue, idempotency keys)
         └─ rgb-node-api  (private; one watch-only rgb-lib wallet per user:
               │            PSBT preparation, balances, receives, broadcast)
-              └─ shared indexer (electrs / esplora) + RGB proxy
+              └─ shared Electrum indexer (electrs) + RGB proxy
 ```
 
 The server prepares transactions on the user's watch-only wallet; the client verifies
@@ -30,6 +30,10 @@ rgb-node-api holds a key. Package READMEs: `packages/gateway/README.md` (config
 reference, deployment, what the gateway needs from rgb-node-api, the custody boundary)
 and `packages/client-sdk/README.md` (quickstart, the verify-before-sign contract);
 `packages/e2e/README.md` covers the regtest journey suite.
+
+UTEXO's signet is its own signet, not Bitcoin's default one, so signet deployments run with
+the `SignetCustom` network (`GATEWAY_BITCOIN_NETWORK=SignetCustom`, invoices tagged `sbc`);
+see "Signet: `SignetCustom`" in `packages/gateway/README.md`.
 
 - **The gateway's HTTP surface is a published contract with out-of-repo consumers** — the
   Kotlin and Swift mobile SDKs. Response schemas are strict (`additionalProperties: false`),
@@ -87,8 +91,8 @@ creates colorable UTXOs that would break the other's `INSUFFICIENT_FUNDS` assert
 
 ## Regtest stack
 
-`regtest/` holds a self-contained docker compose stack — bitcoind, electrs, esplora, the
-RGB proxy and rgb-node-api — driven by `regtest/regtest.sh`. It is used by `pnpm e2e` and
+`regtest/` holds a self-contained docker compose stack — bitcoind, electrs, the RGB proxy
+and rgb-node-api — driven by `regtest/regtest.sh`. It is used by `pnpm e2e` and
 the `WALLET_REGTEST` suites.
 
 ```sh
@@ -105,10 +109,10 @@ the `WALLET_REGTEST` suites.
   repositories. Set `RGB_NODE_API_CONTEXT` to a local checkout or another git ref to test a
   different revision, and rebuild with
   `docker compose -f regtest/compose.yaml build rgb-node-api`.
-- Only rgb-node-api (`http://127.0.0.1:34000`) and esplora (`http://127.0.0.1:3002`) are
-  published on the host; move them with `REGTEST_RGB_NODE_API_PORT` /
-  `REGTEST_ESPLORA_PORT` if those ports are taken. bitcoind, electrs and the RGB proxy are
-  reached by rgb-node-api over the compose network, which is why invoices carry
+- Only rgb-node-api (`http://127.0.0.1:34000`) and electrs (`tcp://127.0.0.1:50001`, the
+  gateway's fee source) are published on the host; move them with
+  `REGTEST_RGB_NODE_API_PORT` / `REGTEST_ELECTRUM_PORT` if those ports are taken.
+  rgb-node-api reaches bitcoind, electrs and the RGB proxy over the compose network, which is why invoices carry
   `rpc://proxy:3000/json-rpc` and the regtest suites configure the gateway's
   `RGB_PROXY_URL` to match.
 - rgb-node-api has no authentication and is published on localhost only. Never expose it
@@ -118,7 +122,7 @@ To run the gateway by hand against the stack:
 
 ```sh
 RGB_NODE_API_URL=http://127.0.0.1:34000 \
-ESPLORA_URL=http://127.0.0.1:3002 \
+ELECTRUM_URL=tcp://127.0.0.1:50001 \
 RGB_PROXY_URL=rpc://proxy:3000/json-rpc \
 GATEWAY_SQLITE_PATH=/tmp/lightsdk-gateway.sqlite \
 GATEWAY_OPERATOR_TOKEN=<random, 16+ chars> \

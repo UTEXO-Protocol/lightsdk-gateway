@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regtest stack for the gateway: bitcoind, electrs, esplora, the RGB proxy and
+# Regtest stack for the gateway: bitcoind, electrs, the RGB proxy and
 # rgb-node-api (see compose.yaml).
 #
 #   ./regtest/regtest.sh start                       fresh chain, all services up
@@ -7,8 +7,8 @@
 #   ./regtest/regtest.sh mine <blocks>               mine to the miner wallet
 #   ./regtest/regtest.sh sendtoaddress <addr> <btc>  pay from the miner wallet
 #
-# Host ports: rgb-node-api on REGTEST_RGB_NODE_API_PORT (34000), esplora on
-# REGTEST_ESPLORA_PORT (3002).
+# Host ports: rgb-node-api on REGTEST_RGB_NODE_API_PORT (34000), electrs on
+# REGTEST_ELECTRUM_PORT (50001).
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 COMPOSE=(docker compose -f compose.yaml)
 BITCOIN_CLI=("${COMPOSE[@]}" exec -T bitcoind bitcoin-cli -regtest -rpcuser=dev -rpcpassword=dev)
 RGB_NODE_API_PORT="${REGTEST_RGB_NODE_API_PORT:-34000}"
-ESPLORA_PORT="${REGTEST_ESPLORA_PORT:-3002}"
+ELECTRUM_PORT="${REGTEST_ELECTRUM_PORT:-50001}"
 INITIAL_BLOCKS=103
 TIMEOUT=180
 
@@ -55,7 +55,7 @@ _mine() {
 
 _start() {
     _stop
-    for port in "$RGB_NODE_API_PORT" "$ESPLORA_PORT"; do
+    for port in "$RGB_NODE_API_PORT" "$ELECTRUM_PORT"; do
         if _is_port_bound "$port"; then
             _die "port $port is already bound, services can't be started"
         fi
@@ -69,9 +69,8 @@ _start() {
     "${COMPOSE[@]}" up -d
     _wait electrs _service_port_open electrs 50001
     _wait proxy _service_port_open proxy 3000
-    _wait esplora curl --fail --silent "http://127.0.0.1:$ESPLORA_PORT/block-height/0"
     _wait rgb-node-api curl --fail --silent "http://127.0.0.1:$RGB_NODE_API_PORT/healthcheck"
-    echo "rgb-node-api: http://127.0.0.1:$RGB_NODE_API_PORT  esplora: http://127.0.0.1:$ESPLORA_PORT"
+    echo "rgb-node-api: http://127.0.0.1:$RGB_NODE_API_PORT  electrs: tcp://127.0.0.1:$ELECTRUM_PORT"
 }
 
 _stop() {

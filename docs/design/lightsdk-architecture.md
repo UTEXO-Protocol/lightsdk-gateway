@@ -55,7 +55,7 @@ browser / mobile app
         │  HTTP, private network
   rgb-node-api  (one watch-only rgb-lib wallet per user: PSBT preparation,
         │        balances, receives, broadcast)
-        └─ shared indexer (electrs / esplora) + RGB proxy
+        └─ shared Electrum indexer (electrs) + RGB proxy
 ```
 
 The gateway's HTTP surface is a published contract: response schemas are strict, so removing
@@ -194,6 +194,9 @@ them.
 - **Asset schemas.** rgb-node-api supports NIA, IFA off mainnet, and BFA only when opted in
   (`src/wallet/config.rs:25-44`). CFA and UDA cannot be received. BFA must stay off while the
   mobile SDKs reject the `bfa` schema.
+- **`SignetCustom` in rgb-node-api.** UTEXO's signet runs as `SignetCustom`, which the
+  gateway supports but rgb-node-api's `network` setting does not accept yet: it treats any
+  name outside mainnet, testnet, testnet4, signet and regtest as mainnet.
 - **Restoring under a new gateway user.** A consequence of the one-user-per-fingerprint rule
   above. Lifting it needs proof that the second user holds the keys, e.g. a signed challenge.
 - **No encrypted client backup (VSS).** The client's only durable secret is the mnemonic.
@@ -245,5 +248,5 @@ lightsdk-gateway (`packages/gateway/src`): `queue.ts`, `wallets/queue.ts`, `idem
 | Send BTC        | verifies + signs     | `POST /v1/onchain/send-btc/prepare` · `/complete`     | `sendbtcbegin` · `sendbtcend`           |
 | Send asset      | verifies + signs     | `POST /v1/onchain/send-asset/prepare` · `/complete`   | `sendbegin` · `sendend`                 |
 | Create UTXOs    | verifies + signs     | `POST /v1/onchain/create-utxos/prepare` · `/complete` | `createutxosbegin` · `createutxosend`   |
-| Fee estimate    | —                    | `GET /v1/onchain/fee-estimate`                        | — (esplora directly)                    |
+| Fee estimate    | —                    | `GET /v1/onchain/fee-estimate`                        | — (Electrum indexer directly)           |
 | Pool eviction   | —                    | —                                                     | `drop`                                  |

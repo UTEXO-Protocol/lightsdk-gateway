@@ -55,7 +55,7 @@ export function registerOnchainRoutes(app: FastifyInstance): void {
     });
   };
 
-  // Fee source for clients, which cannot reach esplora themselves. Read-only,
+  // Fee source for clients, which cannot reach the indexer themselves. Read-only,
   // no Idempotency-Key and not queued behind the per-user wallet work: it makes
   // no wallet call, and a client needs a fee rate BEFORE it can prepare
   // anything — queueing it behind that user's stalled wallet operation would

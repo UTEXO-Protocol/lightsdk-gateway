@@ -8,7 +8,7 @@ export const OPERATOR_TOKEN = 'test-operator-token-0123456789';
 export function testEnv(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     RGB_NODE_API_URL: 'http://127.0.0.1:34000',
-    ESPLORA_URL: 'http://127.0.0.1:3002',
+    ELECTRUM_URL: 'tcp://127.0.0.1:50001',
     RGB_PROXY_URL: 'rpc://127.0.0.1:3000/json-rpc',
     GATEWAY_SQLITE_PATH: ':memory:',
     GATEWAY_OPERATOR_TOKEN: OPERATOR_TOKEN,
@@ -24,7 +24,6 @@ export interface TestServerOptions {
   configOverrides?: Partial<GatewayConfig>;
   loggerStream?: { write(msg: string): void };
   walletBackend?: WalletBackend;
-  esploraFetch?: typeof fetch;
 }
 
 export async function testServer(options: TestServerOptions = {}): Promise<FastifyInstance> {
@@ -33,7 +32,6 @@ export async function testServer(options: TestServerOptions = {}): Promise<Fasti
     config,
     ...(options.loggerStream !== undefined ? { loggerStream: options.loggerStream } : {}),
     ...(options.walletBackend !== undefined ? { walletBackend: options.walletBackend } : {}),
-    ...(options.esploraFetch !== undefined ? { esploraFetch: options.esploraFetch } : {}),
   });
 }
 

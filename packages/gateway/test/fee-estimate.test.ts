@@ -1,51 +1,112 @@
 /**
  * Fee-estimate route and estimator.
  *
- * Clients cannot reach esplora — it sits behind the gateway with rgb-node-api and
- * the RGB proxy — so without this route a client either hardcodes a fee rate or sends
- * none and takes the gateway's 2 sat/vB default. Two roundings are deliberate
- * and tested here: up to a whole sat/vB (never below the estimate the caller
- * asked for), and down the esplora target ladder to the nearest published target
- * at or below the request (never cheaper than the target asked for).
+ * Clients cannot reach the indexer — it sits behind the gateway with rgb-node-api
+ * and the RGB proxy — so without this route a client either hardcodes a fee rate or
+ * sends none and takes the gateway's 2 sat/vB default. The estimator talks to a real
+ * Electrum server stub on loopback, so the protocol framing is exercised too. The
+ * rounding is deliberate and tested here: up to a whole sat/vB, never below the
+ * estimate the caller asked for.
  */
+import { createServer, type AddressInfo, type Socket } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CACHE_TTL_MS, FeeEstimator } from '../src/fees.js';
-import { HttpError } from '../src/errors.js';
 import { createTestUser, testServer, type TestUser } from './helpers.js';
 
-/** The ladder esplora actually publishes, trimmed to the interesting rungs. */
-const LADDER = {
-  '1': 24.61,
-  '2': 18.3,
-  '3': 12.0,
-  '6': 5.42,
-  '10': 3.1,
-  '144': 1.9,
-  '504': 1.2,
-  '1008': 1.0,
-};
+interface ElectrumRequest {
+  id: unknown;
+  method: string;
+  params: unknown[];
+}
 
-function esploraStub(
-  body: unknown,
-  init: { status?: number; json?: () => Promise<unknown> } = {},
-): { fetchImpl: typeof fetch; calls: string[] } {
-  const calls: string[] = [];
-  const fetchImpl = (async (input: string | URL) => {
-    calls.push(String(input));
-    return {
-      ok: (init.status ?? 200) < 400,
-      status: init.status ?? 200,
-      json: init.json ?? (async () => body),
-    } as unknown as Response;
-  }) as unknown as typeof fetch;
-  return { fetchImpl, calls };
+/** The raw reply to one request (newline included), or undefined to send nothing. */
+type Responder = (request: ElectrumRequest, socket: Socket) => string | undefined;
+
+interface ElectrumStub {
+  url: string;
+  /** Every request received, in order, `server.version` included. */
+  requests: ElectrumRequest[];
+  close(): Promise<void>;
+}
+
+function reply(id: unknown, body: { result?: unknown; error?: unknown }): string {
+  return `${JSON.stringify({ jsonrpc: '2.0', id, ...body })}\n`;
+}
+
+/** An Electrum server that answers `server.version` and hands the rest to `respond`. */
+async function electrumStub(respond: Responder): Promise<ElectrumStub> {
+  const requests: ElectrumRequest[] = [];
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.setEncoding('utf8');
+    let buffered = '';
+    socket.on('data', (chunk: string) => {
+      buffered += chunk;
+      let newline = buffered.indexOf('\n');
+      while (newline !== -1) {
+        const request = JSON.parse(buffered.slice(0, newline)) as ElectrumRequest;
+        buffered = buffered.slice(newline + 1);
+        requests.push(request);
+        const answer =
+          request.method === 'server.version'
+            ? reply(request.id, { result: ['stub', '1.4'] })
+            : respond(request, socket);
+        if (answer !== undefined && !socket.destroyed) socket.write(answer);
+        newline = buffered.indexOf('\n');
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `tcp://127.0.0.1:${port}`,
+    requests,
+    close: () =>
+      new Promise((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/** Answers `blockchain.estimatefee` from target → BTC/kvB; -1 (no estimate) otherwise. */
+function rates(table: Record<number, number>): Responder {
+  return (request) => reply(request.id, { result: table[request.params[0] as number] ?? -1 });
+}
+
+function estimateCalls(stub: ElectrumStub): unknown[][] {
+  return stub.requests.filter((r) => r.method === 'blockchain.estimatefee').map((r) => r.params);
 }
 
 describe('FeeEstimator', () => {
+  const stubs: ElectrumStub[] = [];
+
+  async function indexer(respond: Responder): Promise<ElectrumStub> {
+    const stub = await electrumStub(respond);
+    stubs.push(stub);
+    return stub;
+  }
+
+  afterEach(async () => {
+    await Promise.all(stubs.splice(0).map((stub) => stub.close()));
+  });
+
+  it('without an indexer reports every estimate unavailable, never a made-up rate', async () => {
+    const estimator = new FeeEstimator({ electrumUrl: null });
+    expect(estimator.configured).toBe(false);
+    await expect(estimator.estimate(6)).rejects.toMatchObject({
+      statusCode: 502,
+      code: 'FEE_ESTIMATE_UNAVAILABLE',
+    });
+  });
+
   it('rounds a fractional rate UP to a whole sat/vB', async () => {
-    const { fetchImpl } = esploraStub(LADDER);
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
+    const stub = await indexer(rates({ 6: 0.0000542 }));
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
     // 5.42 -> 6, not 5: a client signing at exactly this rate must not land
     // below the estimate it asked for.
     expect(await estimator.estimate(6)).toEqual({
@@ -55,110 +116,97 @@ describe('FeeEstimator', () => {
     });
   });
 
-  it('falls back to the nearest published target at or below the request', async () => {
-    const { fetchImpl } = esploraStub(LADDER);
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
-    // 5 is not published; 3 is, and it is the more urgent (so never cheaper)
-    // neighbour. Answering with the 6-block rate would under-pay for 5 blocks.
+  it('does not round a whole rate up past itself', async () => {
+    // 0.00006 * 1e5 is 6.000000000000001 in floating point; the answer must
+    // still be 6, not 7.
+    const stub = await indexer(rates({ 6: 0.00006 }));
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
+    expect((await estimator.estimate(6)).feeRateSatPerVb).toBe(6);
+  });
+
+  it('negotiates the protocol version, then asks for exactly the requested target', async () => {
+    const stub = await indexer(rates({ 5: 0.00012 }));
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
     expect(await estimator.estimate(5)).toEqual({
       blocks: 5,
       feeRateSatPerVb: 12,
-      sourceBlocks: 3,
+      sourceBlocks: 5,
     });
+    expect(stub.requests.map((r) => [r.method, r.params])).toEqual([
+      ['server.version', ['lightsdk-gateway', '1.4']],
+      ['blockchain.estimatefee', [5]],
+    ]);
   });
 
   it('clamps into the range every fee-taking route accepts', async () => {
-    const { fetchImpl } = esploraStub({ '1': 4000.5, '1008': 0.2 });
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
+    const stub = await indexer(rates({ 1: 0.040005, 1008: 0.000002 }));
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
     expect((await estimator.estimate(1)).feeRateSatPerVb).toBe(1000);
-    // 0.2 rounds up to 1, which is also the floor — a 0 would be rejected by
-    // every route this value is meant to be passed to.
+    // 0.2 sat/vB rounds up to 1, which is also the floor — a 0 would be
+    // rejected by every route this value is meant to be passed to.
     expect((await estimator.estimate(1008)).feeRateSatPerVb).toBe(1);
   });
 
-  it('answers a target below the whole ladder with the fastest published rung', async () => {
-    const { fetchImpl } = esploraStub({ '144': 1.9, '1008': 1.0 });
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
-    expect(await estimator.estimate(6)).toEqual({
-      blocks: 6,
-      feeRateSatPerVb: 2,
-      sourceBlocks: 144,
-    });
-  });
-
-  it('ignores unusable rungs', async () => {
-    const { fetchImpl } = esploraStub({
-      '1': 'not a number',
-      '2': 0,
-      '3': -1,
-      '4': null,
-      'not-a-target': 5,
-      '0': 99,
-      '2016': 99,
-      '6': 5.0,
-    });
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
-    expect(await estimator.estimate(6)).toEqual({
-      blocks: 6,
-      feeRateSatPerVb: 5,
-      sourceBlocks: 6,
-    });
-  });
-
-  it('caches for the TTL so a burst of clients is one indexer call', async () => {
-    const { fetchImpl, calls } = esploraStub(LADDER);
+  it('caches each target for the TTL so a burst of clients is one indexer call', async () => {
+    const stub = await indexer(rates({ 1: 0.0002461, 6: 0.0000542 }));
     let now = 1_000_000;
-    const estimator = new FeeEstimator({
-      esploraUrl: 'http://esplora/',
-      fetchImpl,
-      now: () => now,
-    });
+    const estimator = new FeeEstimator({ electrumUrl: stub.url, now: () => now });
+    await estimator.estimate(6);
     await estimator.estimate(6);
     await estimator.estimate(1);
-    expect(calls).toEqual(['http://esplora/fee-estimates']);
+    expect(estimateCalls(stub)).toEqual([[6], [1]]);
     now += CACHE_TTL_MS;
     await estimator.estimate(6);
-    expect(calls).toHaveLength(2);
+    expect(estimateCalls(stub)).toEqual([[6], [1], [6]]);
   });
 
   it('reports an indexer failure as 502, not as a made-up rate', async () => {
-    for (const stub of [
-      esploraStub(undefined, { status: 503 }),
-      esploraStub([1, 2, 3]),
-      esploraStub({}),
-      esploraStub(undefined, {
-        json: async () => {
-          throw new Error('malformed body');
-        },
-      }),
-    ]) {
-      const estimator = new FeeEstimator({
-        esploraUrl: 'http://esplora',
-        fetchImpl: stub.fetchImpl,
+    const responders: Responder[] = [
+      rates({}), // -1: the node has no estimate yet
+      (request) => reply(request.id, { result: 0 }),
+      (request) => reply(request.id, { result: 'not a number' }),
+      (request) => reply(request.id, { error: { code: -32603, message: 'daemon error' } }),
+      () => 'not json\n',
+      (_request, socket) => {
+        socket.end();
+        return undefined;
+      },
+      () => 'x'.repeat(70 * 1024),
+    ];
+    for (const respond of responders) {
+      const stub = await indexer(respond);
+      const estimator = new FeeEstimator({ electrumUrl: stub.url });
+      await expect(estimator.estimate(6)).rejects.toMatchObject({
+        statusCode: 502,
+        code: 'FEE_ESTIMATE_UNAVAILABLE',
       });
-      await expect(estimator.estimate(6)).rejects.toThrow(HttpError);
-      await expect(estimator.estimate(6)).rejects.toMatchObject({ statusCode: 502 });
     }
+  });
+
+  it('reports an unreachable indexer as 502', async () => {
+    const stub = await indexer(rates({ 6: 0.00006 }));
+    await stub.close();
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
+    await expect(estimator.estimate(6)).rejects.toMatchObject({
+      statusCode: 502,
+      code: 'FEE_ESTIMATE_UNAVAILABLE',
+    });
   });
 
   it('does not cache a failure', async () => {
     let attempt = 0;
-    const fetchImpl = (async () => {
+    const stub = await indexer((request) => {
       attempt += 1;
-      if (attempt === 1) return { ok: false, status: 503 } as unknown as Response;
-      return { ok: true, status: 200, json: async () => LADDER } as unknown as Response;
-    }) as unknown as typeof fetch;
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl });
-    await expect(estimator.estimate(6)).rejects.toThrow(HttpError);
+      return reply(request.id, { result: attempt === 1 ? -1 : 0.00006 });
+    });
+    const estimator = new FeeEstimator({ electrumUrl: stub.url });
+    await expect(estimator.estimate(6)).rejects.toMatchObject({ statusCode: 502 });
     expect((await estimator.estimate(6)).feeRateSatPerVb).toBe(6);
   });
 
   it('times out rather than holding the caller open on a stalled indexer', async () => {
-    const fetchImpl = (async (_input: string | URL, init?: { signal?: AbortSignal }) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
-      })) as unknown as typeof fetch;
-    const estimator = new FeeEstimator({ esploraUrl: 'http://esplora', fetchImpl, timeoutMs: 5 });
+    const stub = await indexer(() => undefined);
+    const estimator = new FeeEstimator({ electrumUrl: stub.url, timeoutMs: 50 });
     await expect(estimator.estimate(6)).rejects.toMatchObject({
       statusCode: 504,
       code: 'UPSTREAM_TIMEOUT',
@@ -167,17 +215,19 @@ describe('FeeEstimator', () => {
 });
 
 describe('GET /v1/onchain/fee-estimate', () => {
+  let stub: ElectrumStub;
   let app: FastifyInstance;
   let user: TestUser;
 
   beforeEach(async () => {
-    const { fetchImpl } = esploraStub(LADDER);
-    app = await testServer({ esploraFetch: fetchImpl });
+    stub = await electrumStub(rates({ 1: 0.0002461, 6: 0.0000542 }));
+    app = await testServer({ configOverrides: { electrumUrl: stub.url } });
     user = await createTestUser(app);
   });
 
   afterEach(async () => {
     await app.close();
+    await stub.close();
   });
 
   function authed() {
@@ -208,7 +258,7 @@ describe('GET /v1/onchain/fee-estimate', () => {
     expect(response.json()).toEqual({ blocks: 6, feeRateSatPerVb: 6, sourceBlocks: 6 });
   });
 
-  it('rejects a target outside the esplora ladder', async () => {
+  it('rejects a target outside 1..1008', async () => {
     for (const blocks of ['0', '1009', 'six', '1.5']) {
       const response = await app.inject({
         method: 'GET',
@@ -233,8 +283,10 @@ describe('GET /v1/onchain/fee-estimate', () => {
   });
 
   it('keeps the indexer failure detail server-side', async () => {
-    const { fetchImpl } = esploraStub(undefined, { status: 503 });
-    const failing = await testServer({ esploraFetch: fetchImpl });
+    const failingStub = await electrumStub((request) =>
+      reply(request.id, { error: { code: -32603, message: 'daemon error: estimatesmartfee' } }),
+    );
+    const failing = await testServer({ configOverrides: { electrumUrl: failingStub.url } });
     const failingUser = await createTestUser(failing);
     const response = await failing.inject({
       method: 'GET',
@@ -245,8 +297,32 @@ describe('GET /v1/onchain/fee-estimate', () => {
     expect(response.json()).toEqual({
       error: { code: 'FEE_ESTIMATE_UNAVAILABLE', message: expect.any(String) },
     });
-    expect(response.body).not.toContain('503');
+    expect(response.body).not.toContain('daemon error');
     await failing.close();
+    await failingStub.close();
+  });
+
+  it('without ELECTRUM_URL, starts with a warning and answers FEE_ESTIMATE_UNAVAILABLE', async () => {
+    const lines: string[] = [];
+    const unconfigured = await testServer({
+      configOverrides: { electrumUrl: null },
+      loggerStream: { write: (msg) => void lines.push(msg) },
+    });
+    const warning = lines
+      .map((line) => JSON.parse(line) as { level: number; msg: string })
+      .find((entry) => entry.msg.startsWith('ELECTRUM_URL is not set'));
+    expect(warning?.level).toBe(40);
+    const unconfiguredUser = await createTestUser(unconfigured);
+    const response = await unconfigured.inject({
+      method: 'GET',
+      url: '/v1/onchain/fee-estimate',
+      headers: { authorization: `Bearer ${unconfiguredUser.token}` },
+    });
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error.code).toBe('FEE_ESTIMATE_UNAVAILABLE');
+    // Every other route is unaffected.
+    expect((await unconfigured.inject({ method: 'GET', url: '/v1/health' })).statusCode).toBe(200);
+    await unconfigured.close();
   });
 });
 

@@ -2,9 +2,9 @@
 # Drive it through ./regtest.sh (start/stop/mine/sendtoaddress), not directly.
 #
 # Only the two services the gateway itself calls are published on the host:
-# rgb-node-api and esplora (fee estimates). bitcoind, electrs and the RGB proxy
-# are reached by rgb-node-api over the compose network by service name, which
-# is also why invoices carry `rpc://proxy:3000/json-rpc` as their transport.
+# rgb-node-api and electrs (fee estimates). rgb-node-api reaches bitcoind,
+# electrs and the RGB proxy over the compose network by service name, which is
+# also why invoices carry `rpc://proxy:3000/json-rpc` as their transport.
 name: lightsdk-gateway-regtest
 
 services:
@@ -30,19 +30,8 @@ services:
       BTCP2PPORT: '18444'
       BTCUSER: dev
       BTCPASS: dev
-    depends_on:
-      - bitcoind
-
-  esplora:
-    image: mempool/electrs:v3.2.0
-    command:
-      - --jsonrpc-import
-      - --cookie=dev:dev
-      - --network=regtest
-      - --daemon-rpc-addr=bitcoind:18443
-      - --http-addr=0.0.0.0:3002
     ports:
-      - 127.0.0.1:${REGTEST_ESPLORA_PORT:-3002}:3002
+      - 127.0.0.1:${REGTEST_ELECTRUM_PORT:-50001}:50001
     depends_on:
       - bitcoind
 

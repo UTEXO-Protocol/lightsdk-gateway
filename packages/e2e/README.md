@@ -8,11 +8,11 @@ a counterparty wallet on rgb-node-api whose keys the harness holds.
 ## Required local infrastructure
 
 - Docker with compose v2, for the repo's regtest stack (`regtest/`): bitcoind,
-  electrs, esplora, the RGB proxy and rgb-node-api. The rgb-node-api image is built
+  electrs, the RGB proxy and rgb-node-api. The rgb-node-api image is built
   from source on first start and needs an ssh-agent key with read access to the
   UTEXO-Protocol repositories (see the workspace README, "Regtest stack").
-- Host ports `34000` (rgb-node-api) and `3002` (esplora) free, or moved with
-  `REGTEST_RGB_NODE_API_PORT` / `REGTEST_ESPLORA_PORT`, plus `8490` for the gateway
+- Host ports `34000` (rgb-node-api) and `50001` (electrs) free, or moved with
+  `REGTEST_RGB_NODE_API_PORT` / `REGTEST_ELECTRUM_PORT`, plus `8490` for the gateway
   (`E2E_GATEWAY_PORT`).
 - Node 20+ and pnpm (`pnpm install`).
 
