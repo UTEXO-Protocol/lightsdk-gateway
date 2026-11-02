@@ -1,6 +1,6 @@
 /**
- * E2e harness: brings up the repo's regtest stack (bitcoind, electrs, esplora,
- * the RGB proxy and rgb-node-api — see regtest/compose.yaml), prepares a
+ * E2e harness: brings up the repo's regtest stack (bitcoind, electrs, the RGB
+ * proxy and rgb-node-api — see regtest/compose.yaml), prepares a
  * counterparty wallet holding an RGB asset, and starts the gateway in-process
  * on a real HTTP port.
  *
@@ -11,7 +11,7 @@
  * Env knobs (see README): E2E_SKIP_STACK=1 reuses an already-running regtest
  * stack, E2E_STOP_STACK=1 tears the containers down afterwards,
  * E2E_GATEWAY_PORT moves the gateway off 8490, and REGTEST_RGB_NODE_API_PORT /
- * REGTEST_ESPLORA_PORT move the stack's host ports.
+ * REGTEST_ELECTRUM_PORT move the stack's host ports.
  */
 import { execSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -25,7 +25,7 @@ import { ClientKeys, verifyAndSignPsbt, type OnchainIntent } from '@utexo/lightw
 const REGTEST_SCRIPT = fileURLToPath(new URL('../../../regtest/regtest.sh', import.meta.url));
 
 export const RGB_NODE_API_URL = `http://127.0.0.1:${process.env['REGTEST_RGB_NODE_API_PORT'] ?? '34000'}`;
-export const ESPLORA_URL = `http://127.0.0.1:${process.env['REGTEST_ESPLORA_PORT'] ?? '3002'}`;
+export const ELECTRUM_URL = `tcp://127.0.0.1:${process.env['REGTEST_ELECTRUM_PORT'] ?? '50001'}`;
 /** The RGB proxy as rgb-node-api reaches it on the compose network; invoices carry this. */
 export const PROXY_URL = 'rpc://proxy:3000/json-rpc';
 
@@ -316,7 +316,7 @@ async function startGateway(
   const config = loadConfig({
     GATEWAY_PORT: String(GATEWAY_PORT),
     RGB_NODE_API_URL,
-    ESPLORA_URL,
+    ELECTRUM_URL,
     RGB_PROXY_URL: PROXY_URL,
     GATEWAY_SQLITE_PATH: join(dbDir, 'gateway.sqlite'),
     GATEWAY_OPERATOR_TOKEN: OPERATOR_TOKEN,

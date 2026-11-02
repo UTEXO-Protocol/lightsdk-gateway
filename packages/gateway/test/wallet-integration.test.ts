@@ -1,6 +1,6 @@
 /**
- * Integration test against the repo's regtest stack (bitcoind, electrs,
- * esplora, RGB proxy and rgb-node-api). Run with:
+ * Integration test against the repo's regtest stack (bitcoind, electrs, RGB
+ * proxy and rgb-node-api). Run with:
  *
  *   ./regtest/regtest.sh start            # from the repository root
  *   WALLET_REGTEST=1 pnpm --filter @utexo/lightsdk-gateway test wallet-integration

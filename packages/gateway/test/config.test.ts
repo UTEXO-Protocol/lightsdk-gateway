@@ -50,7 +50,39 @@ describe('loadConfig', () => {
   });
 
   it('rejects an invalid URL', () => {
-    expect(() => loadConfig(testEnv({ ESPLORA_URL: 'not a url' }))).toThrow(ConfigError);
+    expect(() => loadConfig(testEnv({ RGB_PROXY_URL: 'not a url' }))).toThrow(ConfigError);
+  });
+
+  it('takes the Electrum indexer as tcp://host:port or ssl://host:port', () => {
+    for (const url of [
+      'tcp://electrs:50001',
+      'ssl://electrum.example.com:50002',
+      'tcp://[::1]:50001',
+    ]) {
+      expect(loadConfig(testEnv({ ELECTRUM_URL: url })).electrumUrl).toBe(url);
+    }
+  });
+
+  it('starts without an Electrum URL: fee estimates are the only thing it serves', () => {
+    const env = testEnv();
+    delete (env as Record<string, string | undefined>)['ELECTRUM_URL'];
+    expect(loadConfig(env).electrumUrl).toBeNull();
+    expect(loadConfig(testEnv({ ELECTRUM_URL: '  ' })).electrumUrl).toBeNull();
+  });
+
+  it('rejects an Electrum URL that is set but not tcp:// or ssl:// with a port', () => {
+    // A typo must not silently turn fee estimates off.
+    for (const url of [
+      'http://127.0.0.1:3002', // an esplora REST URL
+      'tcp://electrs',
+      'tcp://electrs:0',
+      'tcp://electrs:50001/path',
+      'tcp://user:secret@electrs:50001',
+      'electrs:50001',
+      'not a url',
+    ]) {
+      expect(() => loadConfig(testEnv({ ELECTRUM_URL: url })), url).toThrow(ConfigError);
+    }
   });
 
   it('rejects a short operator token', () => {

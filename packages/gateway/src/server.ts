@@ -62,8 +62,6 @@ export interface BuildServerOptions {
   loggerLevel?: string;
   /** Wallet backend override (unit tests inject a mock; defaults to rgb-node-api). */
   walletBackend?: WalletBackend;
-  /** Esplora fetch override for the fee estimator. */
-  esploraFetch?: typeof fetch;
   /** Start the background completions worker. Off in tests. */
   startWorkers?: boolean;
 }
@@ -140,13 +138,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   app.decorate('wallets', walletService);
   const onchainService = new OnchainService(db, walletPool, walletService, config);
   app.decorate('onchain', onchainService);
-  app.decorate(
-    'fees',
-    new FeeEstimator({
-      esploraUrl: config.esploraUrl,
-      ...(options.esploraFetch !== undefined ? { fetchImpl: options.esploraFetch } : {}),
-    }),
-  );
+  const fees = new FeeEstimator({ electrumUrl: config.electrumUrl });
+  if (!fees.configured) {
+    app.log.warn(
+      'ELECTRUM_URL is not set: GET /v1/onchain/fee-estimate answers 502 FEE_ESTIMATE_UNAVAILABLE until it is',
+    );
+  }
+  app.decorate('fees', fees);
 
   const completionsWorker = new CompletionsWorker({
     db,

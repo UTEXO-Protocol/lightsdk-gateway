@@ -4,6 +4,7 @@
  * The operator token is a credential: it must never be logged or echoed in any
  * response (invariant I4).
  */
+import { parseElectrumUrl } from './electrum.js';
 
 export interface GatewayConfig {
   /** Interface the gateway listens on. Defaults to loopback. */
@@ -16,7 +17,13 @@ export interface GatewayConfig {
   walletServiceUrl: string;
   /** Per-call timeout for rgb-node-api requests (ms). */
   walletServiceTimeoutMs: number;
-  esploraUrl: string;
+  /**
+   * Electrum server the fee estimate is read from (`tcp://host:port` or
+   * `ssl://host:port`): the same indexer as rgb-node-api's `indexer_address`.
+   * Null when unset: the gateway still starts, warns, and the fee-estimate
+   * route answers FEE_ESTIMATE_UNAVAILABLE. Nothing else reads it.
+   */
+  electrumUrl: string | null;
   /**
    * Default RGB consignment proxy for sends. Receive invoices carry
    * rgb-node-api's own `proxy_address` instead, so keep the two identical.
@@ -82,6 +89,23 @@ function requireUrl(env: Record<string, string | undefined>, name: string): stri
   return value;
 }
 
+/**
+ * Unset (or blank) disables fee estimates rather than failing startup: they
+ * are the only thing the URL serves. A value that is set but malformed still
+ * fails, so a typo cannot silently turn them off.
+ */
+function optionalElectrumUrl(env: Record<string, string | undefined>, name: string): string | null {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return null;
+  const value = raw.trim();
+  if (parseElectrumUrl(value) === undefined) {
+    throw new ConfigError(
+      `environment variable ${name} must be tcp://host:port or ssl://host:port, got: ${value}`,
+    );
+  }
+  return value;
+}
+
 function intWithDefault(
   env: Record<string, string | undefined>,
   name: string,
@@ -142,7 +166,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: intWithDefault(env, 'GATEWAY_PORT', 8480),
     walletServiceUrl: requireUrl(env, 'RGB_NODE_API_URL'),
     walletServiceTimeoutMs: intWithDefault(env, 'GATEWAY_WALLET_SERVICE_TIMEOUT_MS', 60_000),
-    esploraUrl: requireUrl(env, 'ESPLORA_URL'),
+    electrumUrl: optionalElectrumUrl(env, 'ELECTRUM_URL'),
     rgbProxyUrl,
     sqlitePath: requireString(env, 'GATEWAY_SQLITE_PATH'),
     bitcoinNetwork: bitcoinNetwork(env),

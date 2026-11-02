@@ -18,7 +18,7 @@ gateway (see [rgb-node-api](#rgb-node-api) below for the routes and settings it 
 
 ```sh
 RGB_NODE_API_URL=http://127.0.0.1:34000 \
-ESPLORA_URL=http://127.0.0.1:3002 \
+ELECTRUM_URL=tcp://127.0.0.1:50001 \
 RGB_PROXY_URL=rpc://127.0.0.1:3000/json-rpc \
 GATEWAY_SQLITE_PATH=/var/lib/lightsdk-gateway/gateway.sqlite \
 GATEWAY_OPERATOR_TOKEN=<random, 16+ chars> \
@@ -150,20 +150,23 @@ They are not net amounts — what left the wallet is `sentSat - receivedSat`, fe
 ## Fee estimates
 
 `GET /v1/onchain/fee-estimate?blocks=N` (default `N=6`, range 1..1008) answers
-`{blocks, feeRateSatPerVb, sourceBlocks}` from the shared indexer. Clients cannot reach
-esplora themselves — it sits behind the gateway with rgb-node-api and the RGB proxy — so
-without this they either hardcode a rate or send none and take the 2 sat/vB default.
+`{blocks, feeRateSatPerVb, sourceBlocks}` from the shared Electrum indexer
+(`blockchain.estimatefee` on `ELECTRUM_URL`). Clients cannot reach the indexer themselves
+— it sits behind the gateway with rgb-node-api and the RGB proxy — so without this they
+either hardcode a rate or send none and take the 2 sat/vB default.
 
 `feeRateSatPerVb` is a whole sat/vB in the same 1..1000 range every fee-taking route
-accepts, so it can be passed straight back. Two roundings are deliberate, both away from
-under-paying: the fractional rate is rounded **up**, and a target the indexer does not
-publish resolves to the nearest published target **at or below** it (the more urgent, so
-never cheaper, neighbour) — which `sourceBlocks` reports. The answer is cached for 30s, so
-a burst of clients is one indexer call. It needs no `Idempotency-Key`, no registered
-wallet, and is not queued behind the per-user wallet work: a client needs a fee rate
-_before_ it can prepare anything. An indexer that gives no usable estimate answers 502
-`FEE_ESTIMATE_UNAVAILABLE`; one that does not answer within 10 seconds, 504
-`UPSTREAM_TIMEOUT`.
+accepts, so it can be passed straight back. The indexer's rate is rounded **up**, never
+down, so a client signing at exactly this rate does not under-pay the estimate. The
+indexer is asked for exactly the requested target, so `sourceBlocks` always equals
+`blocks`. Each target's answer is cached for 30s, so a burst of clients is one indexer
+call. It needs no `Idempotency-Key`, no registered wallet, and is not queued behind the
+per-user wallet work: a client needs a fee rate _before_ it can prepare anything.
+
+An indexer that gives no usable estimate answers 502 `FEE_ESTIMATE_UNAVAILABLE`. That is
+normal on a quiet test chain, where the indexer's bitcoind has seen too few transactions
+to estimate; send the 2 sat/vB default or a rate of your own. An indexer that does not
+answer within 10 seconds answers 504 `UPSTREAM_TIMEOUT`.
 
 ## Recovering a lost on-chain completion
 
@@ -223,8 +226,8 @@ Three boundaries on that:
   wallet call; otherwise the op is left for an operator rather than completed under a
   transaction its intent does not describe.
 - It stops after `GATEWAY_COMPLETIONS_MAX_ATTEMPTS`. An op that runs out of attempts stays
-  `pending` with its txid and needs a human: check the chain (esplora) for the recorded
-  txid, then mark the row completed or resolve it by hand. `CompletionsWorker.unresolved()` lists
+  `pending` with its txid and needs a human: check the chain (a block explorer for your
+  network) for the recorded txid, then mark the row completed or resolve it by hand. `CompletionsWorker.unresolved()` lists
   exactly those rows and is what a health check should alert on.
 
 The op TTL deliberately does **not** apply here. The TTL exists so an _unsigned_ PSBT
@@ -241,26 +244,26 @@ Required:
 | Variable                 | Meaning                                                                                                                           |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `RGB_NODE_API_URL`       | Base URL of the rgb-node-api service hosting the user wallets (reachable only from the gateway).                                  |
-| `ESPLORA_URL`            | Esplora REST API; source of `GET /v1/onchain/fee-estimate`.                                                                       |
 | `RGB_PROXY_URL`          | Default RGB consignment proxy for asset sends. Keep it identical to rgb-node-api's `proxy_address`, which receive invoices carry. |
 | `GATEWAY_SQLITE_PATH`    | Path to the gateway SQLite database (`:memory:` for tests).                                                                       |
 | `GATEWAY_OPERATOR_TOKEN` | Guards the bootstrap-only `POST /v1/users` route. Minimum 16 characters.                                                          |
 
 Optional (default in parentheses):
 
-| Variable                                      | Meaning                                                                                                                                                                                                                                                                      |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GATEWAY_HOST` (`127.0.0.1`)                  | Interface the gateway listens on.                                                                                                                                                                                                                                            |
-| `GATEWAY_PORT` (`8480`)                       | Gateway HTTP port.                                                                                                                                                                                                                                                           |
-| `GATEWAY_WALLET_SERVICE_TIMEOUT_MS` (`60000`) | Per-call timeout for rgb-node-api requests. A `complete` that times out is reported as `COMPLETE_AMBIGUOUS`, since the service may still finish it.                                                                                                                          |
-| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)         | Network of the user wallets: `Mainnet`, `Testnet`, `Testnet4`, `Signet`, `SignetCustom`, `Regtest`. Must match rgb-node-api's `network`; the gateway uses it to decode addresses and attribute deposit addresses. **`Signet` means Bitcoin's _default_ signet** — see below. |
-| `GATEWAY_WALLET_MAX_OPEN` (`32`)              | LRU capacity of the open-wallet pool. An evicted wallet is also dropped from rgb-node-api's memory (`/wallet/drop`), so this bounds what that service keeps loaded.                                                                                                          |
-| `GATEWAY_ONCHAIN_OP_TTL_SECONDS` (`600`)      | Seconds an unsigned prepare-step PSBT stays completable before expiring.                                                                                                                                                                                                     |
-| `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (empty)     | Comma-separated extra RGB consignment-proxy endpoints users may pin in send-asset requests. `RGB_PROXY_URL` is always allowlisted; anything else is rejected with 400 `TRANSPORT_ENDPOINT_NOT_ALLOWED` (SSRF guard — the wallet service dials these).                        |
-| `GATEWAY_COMPLETIONS_INTERVAL_MS` (`30000`)   | Poll interval of the ambiguous-completion worker.                                                                                                                                                                                                                            |
-| `GATEWAY_COMPLETIONS_MAX_ATTEMPTS` (`5`)      | Attempts at finishing one ambiguous operation before it is left to an operator.                                                                                                                                                                                              |
-| `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` (`4`)      | Max downstream operations running at once across all users.                                                                                                                                                                                                                  |
-| `GATEWAY_QUEUE_PER_USER_DEPTH` (`16`)         | Max queued+running operations per user before 429.                                                                                                                                                                                                                           |
+| Variable                                      | Meaning                                                                                                                                                                                                                                                                                                                     |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ELECTRUM_URL` (unset)                        | Electrum server for `GET /v1/onchain/fee-estimate`, as `tcp://host:port` or `ssl://host:port`. Use rgb-node-api's `indexer_address` ([Indexer requirements](#indexer-requirements)). Unset, the gateway starts with a warning and that route answers 502 `FEE_ESTIMATE_UNAVAILABLE`; a malformed value still stops startup. |
+| `GATEWAY_HOST` (`127.0.0.1`)                  | Interface the gateway listens on.                                                                                                                                                                                                                                                                                           |
+| `GATEWAY_PORT` (`8480`)                       | Gateway HTTP port.                                                                                                                                                                                                                                                                                                          |
+| `GATEWAY_WALLET_SERVICE_TIMEOUT_MS` (`60000`) | Per-call timeout for rgb-node-api requests. A `complete` that times out is reported as `COMPLETE_AMBIGUOUS`, since the service may still finish it.                                                                                                                                                                         |
+| `GATEWAY_BITCOIN_NETWORK` (`Regtest`)         | Network of the user wallets: `Mainnet`, `Testnet`, `Testnet4`, `Signet`, `SignetCustom`, `Regtest`. Must match rgb-node-api's `network`; the gateway uses it to decode addresses and attribute deposit addresses. **UTEXO's signet runs as `SignetCustom`**; `Signet` means Bitcoin's _default_ signet — see below.         |
+| `GATEWAY_WALLET_MAX_OPEN` (`32`)              | LRU capacity of the open-wallet pool. An evicted wallet is also dropped from rgb-node-api's memory (`/wallet/drop`), so this bounds what that service keeps loaded.                                                                                                                                                         |
+| `GATEWAY_ONCHAIN_OP_TTL_SECONDS` (`600`)      | Seconds an unsigned prepare-step PSBT stays completable before expiring.                                                                                                                                                                                                                                                    |
+| `GATEWAY_RGB_TRANSPORT_ALLOWLIST` (empty)     | Comma-separated extra RGB consignment-proxy endpoints users may pin in send-asset requests. `RGB_PROXY_URL` is always allowlisted; anything else is rejected with 400 `TRANSPORT_ENDPOINT_NOT_ALLOWED` (SSRF guard — the wallet service dials these).                                                                       |
+| `GATEWAY_COMPLETIONS_INTERVAL_MS` (`30000`)   | Poll interval of the ambiguous-completion worker.                                                                                                                                                                                                                                                                           |
+| `GATEWAY_COMPLETIONS_MAX_ATTEMPTS` (`5`)      | Attempts at finishing one ambiguous operation before it is left to an operator.                                                                                                                                                                                                                                             |
+| `GATEWAY_QUEUE_GLOBAL_CONCURRENCY` (`4`)      | Max downstream operations running at once across all users.                                                                                                                                                                                                                                                                 |
+| `GATEWAY_QUEUE_PER_USER_DEPTH` (`16`)         | Max queued+running operations per user before 429.                                                                                                                                                                                                                                                                          |
 
 ## rgb-node-api
 
@@ -306,7 +309,12 @@ lists the wallet's assets and then each asset's transfers (see Known limitations
 
 ### Settings to align
 
-- `network` must match `GATEWAY_BITCOIN_NETWORK`.
+- `network` must match `GATEWAY_BITCOIN_NETWORK`. For `SignetCustom` that takes an
+  rgb-node-api that accepts `network = "SignetCustom"`. As of `0d81897` it does not: it
+  knows `mainnet`, `testnet`, `testnet4`, `signet` and `regtest`, and treats any other
+  value as mainnet, so wallets on a custom signet fail to open.
+- `indexer_address` must be the Electrum server `ELECTRUM_URL` names, so wallets and fee
+  estimates read the same chain.
 - `proxy_address` is what receive invoices carry as their transport endpoint; keep
   `RGB_PROXY_URL` identical to it.
 - Leave `bfa_enabled` off: the gateway passes asset schemas through verbatim and the
@@ -316,34 +324,34 @@ lists the wallet's assets and then each asset's transfers (see Known limitations
 
 ### Indexer requirements
 
-rgb-node-api's `indexer_address` accepts **either** an Electrum server (`tcp://host:port`,
-`ssl://host:port`) **or** an esplora REST base URL (`https://…`): it builds rgb-lib with
-both the `electrum` and `esplora` features, and rgb-lib picks the client by probing
-Electrum first and falling back to esplora.
+The gateway and rgb-node-api share one Electrum indexer: rgb-node-api's `indexer_address`
+and the gateway's `ELECTRUM_URL` name the same server, as `tcp://host:port` or
+`ssl://host:port`. It must be a full Electrum server, such as romanz/electrs (what the
+regtest stack runs) or Fulcrum, because rgb-lib checks three things when a wallet opens:
 
-The two are not equivalent, and esplora is the more forgiving:
+- the server's genesis block matches the configured network;
+- a probe transaction can be fetched. That is a fixed, known transaction on mainnet,
+  testnet, testnet4, the default signet and regtest, and the coinbase of block 1 on
+  `SignetCustom`;
+- the server returns verbose transactions (`blockchain.transaction.get` with `verbose`).
 
-|                                                        | Electrum resolver | esplora resolver |
-| ------------------------------------------------------ | ----------------- | ---------------- |
-| genesis hash matches the configured network            | required          | required         |
-| a known probe transaction exists (default signet only) | required          | —                |
-| verbose transactions supported                         | required          | —                |
+Blockstream/mempool `electrs` fails the last check over its Electrum port (`verbose
+transactions are unsupported by the provided electrum service`), so it cannot be the
+indexer. rgb-node-api also accepts an esplora REST URL as `indexer_address`; don't use
+one, since the gateway reads its fee estimates over Electrum and both must read the same
+chain.
 
-So Blockstream/mempool `electrs` — the binary behind the esplora REST API — is **rejected
-over its Electrum port** (`verbose transactions are currently unsupported`) while working
-fine over its **esplora REST port**. Pointing `indexer_address` at the same esplora URL
-as the gateway's `ESPLORA_URL` is a valid and usually simpler deployment; a full
-Electrum server (romanz/electrs, Fulcrum) is the alternative.
+### Signet: `SignetCustom`
 
-### `Signet` vs `SignetCustom`
+UTEXO's signet is its own signet, with its own challenge, not Bitcoin's default public
+signet, so it runs as **`SignetCustom`**: set `GATEWAY_BITCOIN_NETWORK=SignetCustom` and
+rgb-node-api's `network` to match. `Signet` means only the default public signet.
 
-`GATEWAY_BITCOIN_NETWORK=Signet` means Bitcoin's **default, public** signet. A signet
-running its own challenge is `SignetCustom`. Every signet shares the same genesis block
-hash, so the indexer check alone will NOT catch the difference when using esplora — but
-the two are distinct chains to RGB and they tag invoices differently: `sb` for `Signet`,
-`sbc` for `SignetCustom`. Getting this wrong yields a wallet that opens cleanly and then
-produces RGB invoices no counterparty on the real chain will accept. Set
-`GATEWAY_BITCOIN_NETWORK` to the same network as rgb-node-api's `network`.
+The two are distinct chains to RGB, and they tag invoices differently: `sb` for `Signet`,
+`sbc` for `SignetCustom`. Assets and invoices made under one are not valid under the
+other. Every signet has the same genesis block, so the genesis check cannot tell them
+apart. Over Electrum, `Signet` on a custom signet fails the probe-transaction check
+instead, because its probe is a default-signet transaction.
 
 ### Diagnosing a failed `POST /v1/wallet/xpubs`
 
@@ -361,13 +369,16 @@ If that route fails on a fresh deployment while every other route works, check t
 first. Two commands settle it:
 
 ```sh
-# 1. Electrum indexer only: does it support verbose transactions?
-#    (result = usable, error = use the esplora URL instead, or a full Electrum server)
+# 1. Does the indexer return verbose transactions?
+#    (result = usable, error = not a full Electrum server: use romanz/electrs or Fulcrum)
 printf '{"jsonrpc":"2.0","id":1,"method":"blockchain.transaction.get","params":["<a txid on your chain>",true]}\n' | nc <host> <port>
 
-# 2. Is this the DEFAULT signet? (404 = custom signet, so use SignetCustom)
-curl -s -o /dev/null -w '%{http_code}\n' "$ESPLORA_URL/tx/8153034f45e695453250a8fb7225a5e545144071d8ed7b0d3211efa1f3c92ad8"
+# 2. Is this the DEFAULT signet? (error = a custom signet, so use SignetCustom)
+printf '{"jsonrpc":"2.0","id":1,"method":"blockchain.transaction.get","params":["8153034f45e695453250a8fb7225a5e545144071d8ed7b0d3211efa1f3c92ad8",false]}\n' | nc <host> <port>
 ```
+
+For an `ssl://` indexer, use `openssl s_client -quiet -connect <host>:<port>` in place of
+`nc <host> <port>`.
 
 ## The custody boundary, honestly
 

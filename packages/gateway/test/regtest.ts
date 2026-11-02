@@ -21,14 +21,14 @@ import { sleep } from './helpers.js';
 const REGTEST_SCRIPT = fileURLToPath(new URL('../../../regtest/regtest.sh', import.meta.url));
 
 export const RGB_NODE_API_URL = `http://127.0.0.1:${process.env['REGTEST_RGB_NODE_API_PORT'] ?? '34000'}`;
-export const ESPLORA_URL = `http://127.0.0.1:${process.env['REGTEST_ESPLORA_PORT'] ?? '3002'}`;
+export const ELECTRUM_URL = `tcp://127.0.0.1:${process.env['REGTEST_ELECTRUM_PORT'] ?? '50001'}`;
 /** The RGB proxy as rgb-node-api reaches it on the compose network; invoices carry this. */
 export const PROXY_URL = 'rpc://proxy:3000/json-rpc';
 
 /** Gateway config overrides pointing at the regtest stack. */
 export const REGTEST_CONFIG: Partial<GatewayConfig> = {
   walletServiceUrl: RGB_NODE_API_URL,
-  esploraUrl: ESPLORA_URL,
+  electrumUrl: ELECTRUM_URL,
   rgbProxyUrl: PROXY_URL,
   rgbTransportAllowlist: [PROXY_URL],
 };

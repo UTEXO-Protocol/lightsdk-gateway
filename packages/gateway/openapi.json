@@ -3085,7 +3085,7 @@
                     },
                     "sourceBlocks": {
                       "type": "integer",
-                      "description": "Target the estimate was read from: the nearest one the indexer publishes at or below `blocks`."
+                      "description": "Target the indexer was asked for. Always equals `blocks`."
                     }
                   },
                   "required": [
@@ -3144,7 +3144,7 @@
             }
           },
           "502": {
-            "description": "- `FEE_ESTIMATE_UNAVAILABLE`: The indexer gave no usable fee estimate.",
+            "description": "- `FEE_ESTIMATE_UNAVAILABLE`: No usable fee estimate: the indexer had none, for example because its node has seen too few transactions to estimate (common on test networks), or the gateway has no indexer configured.",
             "headers": {
               "x-request-id": {
                 "$ref": "#/components/headers/RequestId"

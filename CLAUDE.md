@@ -14,7 +14,7 @@ client SDK, and a regtest e2e suite. It is on-chain only. Test with `pnpm test`.
 - The parity fixture `packages/client-sdk/test/fixtures/rgblib-parity.json` is
   rgb-lib-authored ground truth: read by relative path, never copied or regenerated here.
 - The regtest suites run against the repo's own stack in `regtest/` (bitcoind, electrs,
-  esplora, RGB proxy, rgb-node-api), driven by `regtest/regtest.sh`.
+  RGB proxy, rgb-node-api), driven by `regtest/regtest.sh`.
 - Invariants to enforce in review: no secret ever reaches the gateway (I1), one watch-only
   rgb-lib wallet per user (I2), no cross-user visibility (I3), only the gateway can reach
   rgb-node-api (I4). rgb-node-api keys wallets by master fingerprint alone, so a
