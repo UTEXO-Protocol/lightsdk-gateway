@@ -17,6 +17,9 @@ import type {
 
 export const EMPTY_BALANCE = { settled: 0, future: 0, spendable: 0 };
 
+/** The `pk` every mock receive reports, as an RGB proxy protocol 1.0 wallet would. */
+export const MOCK_RECEIVER_PUBLIC_KEY = 'ab'.repeat(32);
+
 export interface MockWalletData {
   address?: string;
   btcBalance?: WalletBtcBalance;
@@ -94,6 +97,7 @@ export class MockWalletHandle implements WalletHandle {
         recipientId: `mock-recipient-${this.identity.userId}-${this.receiveCount}`,
         expirationTimestamp: 1_700_000_000 + request.durationSeconds,
         batchTransferIdx: this.receiveCount,
+        publicKey: MOCK_RECEIVER_PUBLIC_KEY,
       };
     });
   }

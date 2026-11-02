@@ -49,6 +49,11 @@ export const ERROR_CODES = {
     meaning:
       'rgb-lib rejected the request itself: bad recipient id, asset id, address, fee rate or transport endpoint. The detail stays server-side.',
   },
+  INVALID_RECIPIENT_PUBLIC_KEY: {
+    status: 400,
+    meaning:
+      "The wallet service needs the recipient invoice's `pk` (RGB proxy protocol 1.0) and it was missing or invalid: pass it as `recipientPublicKey`.",
+  },
   INSUFFICIENT_FUNDS: {
     status: 400,
     meaning: 'Not enough confirmed bitcoins, assets or allocation slots.',
@@ -315,7 +320,7 @@ const ROUTE_DOCS: Record<string, RouteDoc> = {
     operationId: 'prepareSendAsset',
     summary: 'Prepare an RGB asset send',
     description:
-      "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it.",
+      "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
     tag: 'On-chain',
     auth: 'bearer',
     idempotent: true,
@@ -324,6 +329,7 @@ const ROUTE_DOCS: Record<string, RouteDoc> = {
       'TRANSPORT_ENDPOINT_NOT_ALLOWED',
       'WALLET_NOT_REGISTERED',
       'WALLET_REQUEST_REJECTED',
+      'INVALID_RECIPIENT_PUBLIC_KEY',
       'INSUFFICIENT_FUNDS',
       'QUEUE_FULL',
     ],

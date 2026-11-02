@@ -55,8 +55,31 @@ export const intentSchema = {
           items: { type: 'string' },
           description: 'Consignment endpoints the transfer is posted to.',
         },
+        recipientPublicKey: {
+          type: ['string', 'null'],
+          description:
+            "The recipient invoice's `pk` the consignment is encrypted to, as sent; null when not given.",
+        },
+        recipientExpirationTimestamp: {
+          type: ['integer', 'null'],
+          description: "The recipient invoice's `expiry`, as sent; null when not given.",
+        },
+        recipientEncryption: {
+          type: ['string', 'null'],
+          enum: ['required', 'optional', 'unsupported', null],
+          description: "The recipient invoice's `enc`, as sent; null when not given.",
+        },
       },
-      required: ['assetId', 'amount', 'recipientId', 'witnessAmountSat', 'transportEndpoints'],
+      required: [
+        'assetId',
+        'amount',
+        'recipientId',
+        'witnessAmountSat',
+        'transportEndpoints',
+        'recipientPublicKey',
+        'recipientExpirationTimestamp',
+        'recipientEncryption',
+      ],
       additionalProperties: false,
     },
     utxos: {
@@ -273,6 +296,26 @@ export const sendAssetPrepareRouteSchema = {
         maxItems: 4,
         description:
           "Consignment endpoints, each on the operator's allowlist. Default: the gateway's `RGB_PROXY_URL`.",
+      },
+      // RGB proxy protocol 1.0: the consignment is encrypted to the recipient,
+      // so its invoice's key and expiry travel with the send. Optional for
+      // older wallet services; rgb-lib-bfa refuses a send without the key.
+      recipientPublicKey: {
+        type: 'string',
+        pattern: '^[0-9a-f]{64}$',
+        description:
+          "The recipient invoice's `pk` (Ed25519, 32 bytes as lowercase hex). Required by an RGB proxy protocol 1.0 wallet service.",
+      },
+      recipientExpirationTimestamp: {
+        type: 'integer',
+        minimum: 0,
+        description: "The recipient invoice's `expiry`, unix seconds.",
+      },
+      recipientEncryption: {
+        type: 'string',
+        enum: ['required', 'optional', 'unsupported'],
+        description:
+          "The recipient invoice's `enc`: absent is `required`, `1` is `optional`, `0` is `unsupported`. Omit it when the invoice has none.",
       },
       donation: {
         type: 'boolean',

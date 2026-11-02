@@ -6,7 +6,7 @@
  * operation unless the caller pins its own (retry the SAME operation with the
  * SAME key to get the cached response instead of a duplicate spend).
  */
-import type { OnchainIntent } from './verify.js';
+import type { OnchainIntent, RecipientEncryption } from './verify.js';
 
 export interface GatewayClientOptions {
   baseUrl: string;
@@ -162,6 +162,12 @@ export interface ReceiveResult {
   expirationTimestamp: number | null;
   /** Batch index of the created receive; null only on rgb-lib shape drift. */
   batchTransferIdx: number | null;
+  /**
+   * The receiver's key, the invoice's `pk`: a sender passes it as
+   * `recipientPublicKey`. Null (or absent, from an older gateway) before RGB
+   * proxy protocol 1.0.
+   */
+  publicKey?: string | null;
   mode: 'blind' | 'witness';
 }
 
@@ -184,6 +190,13 @@ export interface PrepareSendAssetParams {
   recipientId: string;
   witnessAmountSat?: number;
   transportEndpoints?: string[];
+  /**
+   * From the recipient's invoice: `pk`, `expiry` and `enc`. An RGB proxy
+   * protocol 1.0 wallet service refuses a send without the key.
+   */
+  recipientPublicKey?: string;
+  recipientExpirationTimestamp?: number;
+  recipientEncryption?: RecipientEncryption;
   donation?: boolean;
   minConfirmations?: number;
   feeRateSatPerVb?: number;
@@ -503,6 +516,22 @@ export class GatewayClient {
         mismatch(
           `transportEndpoints ${asset.transportEndpoints.join(',')} != ${endpoints.join(',')}`,
         );
+      }
+      // The consignment is encrypted to this key: one the caller never gave,
+      // or a different one, would hand the transfer to someone else's reader.
+      const recipientChecks = [
+        ['recipientPublicKey', params.recipientPublicKey, asset.recipientPublicKey],
+        [
+          'recipientExpirationTimestamp',
+          params.recipientExpirationTimestamp,
+          asset.recipientExpirationTimestamp,
+        ],
+        ['recipientEncryption', params.recipientEncryption, asset.recipientEncryption],
+      ] as const;
+      for (const [name, sent, echoed] of recipientChecks) {
+        if ((echoed ?? null) !== (sent ?? null)) {
+          mismatch(`${name} ${String(echoed ?? null)} != ${String(sent ?? null)}`);
+        }
       }
       const fee = checkPinned('feeRateSatPerVb', params.feeRateSatPerVb, intent.feeRateSatPerVb);
       if (fee !== null) mismatch(fee);

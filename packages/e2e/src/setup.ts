@@ -210,17 +210,24 @@ export class Counterparty {
     );
   }
 
-  async sendAsset(assetId: string, recipientId: string, amount: number): Promise<string> {
+  /**
+   * `recipient` is the receiver's invoice key and expiry: RGB proxy protocol
+   * 1.0 encrypts the consignment to that key, and rgb-lib refuses a send with
+   * transport endpoints but no key.
+   */
+  async sendAsset(assetId: string, recipient: InvoiceRecipient, amount: number): Promise<string> {
     const sent = await this.beginSignEnd<{ txid: string }>(
       'send',
       {
         recipient_map: {
           [assetId]: [
             {
-              recipient_id: recipientId,
+              recipient_id: recipient.recipientId,
               witness_data: null,
               amount,
               transport_endpoints: [PROXY_URL],
+              public_key: recipient.publicKey,
+              expiration_timestamp: recipient.expirationTimestamp,
             },
           ],
         },
@@ -236,7 +243,7 @@ export class Counterparty {
         asset: {
           assetId,
           amount,
-          recipientId,
+          recipientId: recipient.recipientId,
           witnessAmountSat: null,
           transportEndpoints: [PROXY_URL],
         },
@@ -246,13 +253,30 @@ export class Counterparty {
     return sent.txid;
   }
 
-  async blindReceive(assetId: string): Promise<string> {
-    const receive = await this.call<{ recipient_id: string }>('blindreceive', {
+  async blindReceive(assetId: string): Promise<InvoiceRecipient> {
+    const receive = await this.call<{
+      recipient_id: string;
+      public_key: string;
+      expiration_timestamp: number;
+    }>('blindreceive', {
       asset_id: assetId,
       duration_seconds: 3600,
     });
-    return receive.recipient_id;
+    return {
+      recipientId: receive.recipient_id,
+      publicKey: receive.public_key,
+      expirationTimestamp: receive.expiration_timestamp,
+    };
   }
+}
+
+/** What a sender needs from the receiver's invoice under RGB proxy protocol 1.0. */
+export interface InvoiceRecipient {
+  recipientId: string;
+  /** The invoice's `pk`. */
+  publicKey: string;
+  /** The invoice's `expiry`, unix seconds. */
+  expirationTimestamp: number;
 }
 
 /** Fund the counterparty, give it colorable UTXOs and issue the journey's NIA asset. */

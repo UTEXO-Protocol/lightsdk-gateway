@@ -322,6 +322,22 @@ lists the wallet's assets and then each asset's transfers (see Known limitations
 - rgb-node-api supports the NIA and (off mainnet) IFA schemas only. CFA and UDA assets
   cannot be received through it.
 
+### RGB proxy protocol 1.0
+
+rgb-node-api main is built on rgb-lib-bfa, which speaks RGB proxy protocol **1.0** and
+nothing else: the proxy at `proxy_address` must report `protocol_version` `1.0`, as
+`rgb-proxy-server` 0.4.0 does (0.3.0 speaks 0.2). Check with
+`curl -s -X POST <proxy>/json-rpc -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":"1","method":"server.info","params":null}'`.
+
+Protocol 1.0 encrypts each consignment to its recipient, so an invoice carries the
+receiver's Ed25519 key as `pk`:
+
+- `POST /v1/wallet/receive` returns that key as `publicKey`.
+- A sender passes the recipient invoice's `pk`, `expiry` and (when present) `enc` to
+  `POST /v1/onchain/send-asset/prepare` as `recipientPublicKey`,
+  `recipientExpirationTimestamp` and `recipientEncryption`; the intent echoes them. Without
+  the key the send answers 400 `INVALID_RECIPIENT_PUBLIC_KEY`.
+
 ### Indexer requirements
 
 The gateway and rgb-node-api share one Electrum indexer: rgb-node-api's `indexer_address`

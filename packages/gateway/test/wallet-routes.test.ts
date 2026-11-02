@@ -572,6 +572,8 @@ describe('wallet routes', () => {
       const body = response.json();
       expect(body.mode).toBe('blind');
       expect(body.invoice).toContain('mock-invoice');
+      // A sender needs it for an RGB proxy protocol 1.0 send.
+      expect(body.publicKey).toBe('ab'.repeat(32));
 
       const row = app.db
         .prepare('SELECT user_id, state FROM resource_map WHERE kind = ? AND resource_id = ?')

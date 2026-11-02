@@ -110,6 +110,9 @@ describe('RgbNodeApiWalletBackend requests', () => {
         amount: 25,
         witnessAmountSat: 1_000,
         transportEndpoints: ['rpc://proxy:3000/json-rpc'],
+        recipientPublicKey: null,
+        recipientExpirationTimestamp: null,
+        recipientEncryption: null,
         donation: false,
         feeRateSatPerVb: 3,
         minConfirmations: 1,
@@ -153,12 +156,65 @@ describe('RgbNodeApiWalletBackend requests', () => {
     ]);
   });
 
+  it('passes the recipient key, expiry and encryption of a proxy protocol 1.0 send', async () => {
+    const { handle, calls } = await handleFor(ok({ psbt: 'psbt-asset' }));
+    await handle.sendAssetBegin({
+      assetId: 'rgb:asset',
+      recipientId: 'sb:wvout:recipient',
+      amount: 25,
+      witnessAmountSat: 1_000,
+      transportEndpoints: ['rpcs://proxy.example/json-rpc'],
+      recipientPublicKey: 'cd'.repeat(32),
+      recipientExpirationTimestamp: 1_793_723_445,
+      recipientEncryption: 'optional',
+      donation: false,
+      feeRateSatPerVb: 2,
+      minConfirmations: 1,
+      expirationTimestamp: 1_700_000_600,
+    });
+    const body = calls[0]!.body as { recipient_map: Record<string, unknown[]> };
+    expect(body.recipient_map['rgb:asset']).toEqual([
+      {
+        recipient_id: 'sb:wvout:recipient',
+        witness_data: { amount_sat: 1_000, blinding: null },
+        amount: 25,
+        transport_endpoints: ['rpcs://proxy.example/json-rpc'],
+        public_key: 'cd'.repeat(32),
+        expiration_timestamp: 1_793_723_445,
+        // rgb-lib's serde spelling of Encryption::Optional.
+        encryption: 'Optional',
+      },
+    ]);
+  });
+
+  it('names a missing recipient key on its own, not as a generic rejection', () => {
+    // What rgb-node-api main answers a send without `public_key`.
+    const error = serviceError(
+      'sendAssetBegin',
+      '/wallet/sendbegin',
+      400,
+      JSON.stringify({
+        error: {
+          code: 1001,
+          status: 'bad_input',
+          message: 'Invalid pubkey: missing recipient public key',
+          details: { kind: 'InvalidPubkey' },
+        },
+      }),
+    );
+    expect(error.clientError).toBe(true);
+    const mapped = walletHttpError(error) as HttpError;
+    expect(mapped.statusCode).toBe(400);
+    expect(mapped.code).toBe('INVALID_RECIPIENT_PUBLIC_KEY');
+  });
+
   it('routes receives by mode and passes the duration through', async () => {
     const receiveData = {
       invoice: 'rgb:~/~/~/bcrt:utxob:abc',
       recipient_id: 'utxob:abc',
       expiration_timestamp: 1_700_003_600,
       batch_transfer_idx: 9,
+      public_key: 'ef'.repeat(32),
     };
     const { handle, calls } = await handleFor(ok(receiveData), ok(receiveData));
     const request = {
@@ -172,6 +228,7 @@ describe('RgbNodeApiWalletBackend requests', () => {
       recipientId: 'utxob:abc',
       expirationTimestamp: 1_700_003_600,
       batchTransferIdx: 9,
+      publicKey: 'ef'.repeat(32),
     });
     await handle.receive({ ...request, mode: 'witness', assetId: 'rgb:asset', amount: 5 });
     expect(calls.map((call) => [call.url.replace(BASE_URL, '/'), call.body])).toEqual([

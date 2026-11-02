@@ -491,9 +491,21 @@ export const walletReceiveRouteSchema = {
           description:
             'Batch index of the created receive, which rgb-lib refreshes, fails and deletes it by.',
         },
+        publicKey: {
+          type: ['string', 'null'],
+          description:
+            "The receiver's Ed25519 key (hex), also the invoice's `pk`: a sender passes it as `recipientPublicKey`. Null from a wallet service older than RGB proxy protocol 1.0.",
+        },
         mode: { type: 'string', enum: ['blind', 'witness'] },
       },
-      required: ['invoice', 'recipientId', 'expirationTimestamp', 'batchTransferIdx', 'mode'],
+      required: [
+        'invoice',
+        'recipientId',
+        'expirationTimestamp',
+        'batchTransferIdx',
+        'publicKey',
+        'mode',
+      ],
       additionalProperties: false,
     },
     400: errorBodySchema,

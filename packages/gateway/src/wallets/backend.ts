@@ -134,7 +134,15 @@ export interface ReceiveData {
   expirationTimestamp: number | null;
   /** Batch index of the created receive; null only on rgb-lib shape drift. */
   batchTransferIdx: number | null;
+  /**
+   * The receiver's Ed25519 public key (hex), the invoice's `pk`. Null from an
+   * rgb-node-api older than RGB proxy protocol 1.0, which has none.
+   */
+  publicKey: string | null;
 }
+
+/** The invoice's `enc`: how the recipient wants the consignment exchanged. */
+export type RecipientEncryption = 'required' | 'optional' | 'unsupported';
 
 export interface SendAssetBeginRequest {
   assetId: string;
@@ -144,6 +152,14 @@ export interface SendAssetBeginRequest {
   /** Sats carried by the witness output; null for blind recipients. */
   witnessAmountSat: number | null;
   transportEndpoints: string[];
+  /**
+   * From the recipient's invoice, for RGB proxy protocol 1.0: its `pk` (the
+   * consignment is encrypted to it), its `expiry` and its `enc`. Null when the
+   * caller gave none; rgb-lib then refuses a send with transport endpoints.
+   */
+  recipientPublicKey: string | null;
+  recipientExpirationTimestamp: number | null;
+  recipientEncryption: RecipientEncryption | null;
   donation: boolean;
   feeRateSatPerVb: number;
   minConfirmations: number;
@@ -229,6 +245,8 @@ export class WalletBackendError extends Error {
      * can have been broadcast.
      */
     readonly unsupported: boolean = false,
+    /** rgb-lib error variant rgb-node-api named (`details.kind`), if any. */
+    readonly rgbLibKind: string | null = null,
   ) {
     super(message);
     this.name = 'WalletBackendError';
@@ -277,6 +295,17 @@ export function walletHttpError(error: unknown): unknown {
       400,
       'INSUFFICIENT_FUNDS',
       'not enough confirmed bitcoins, assets or allocation slots for this operation',
+      { cause: error },
+    );
+  }
+  if (error.clientError && error.rgbLibKind === 'InvalidPubkey') {
+    // RGB proxy protocol 1.0 encrypts the consignment to the recipient, so a
+    // send needs the invoice's `pk`. Named on its own: the generic rejection
+    // would not tell the caller which field to supply.
+    return new HttpError(
+      400,
+      'INVALID_RECIPIENT_PUBLIC_KEY',
+      "the recipient public key is missing or invalid: pass the invoice's pk as recipientPublicKey",
       { cause: error },
     );
   }

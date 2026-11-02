@@ -24,6 +24,7 @@ import {
   type CreateUtxosParams,
   type ReceiveData,
   type ReceiveRequest,
+  type RecipientEncryption,
   type SendAssetBeginRequest,
   type UnspentAllocation,
   type UserXpubs,
@@ -38,6 +39,13 @@ import {
 } from './backend.js';
 
 export const DEFAULT_WALLET_SERVICE_TIMEOUT_MS = 60_000;
+
+/** rgb-lib `Encryption` as serde spells it (src/database/enums.rs, no rename). */
+const RGB_LIB_ENCRYPTION: Record<RecipientEncryption, string> = {
+  required: 'Required',
+  optional: 'Optional',
+  unsupported: 'Unsupported',
+};
 
 /**
  * rgb-lib error variants that mean "the REQUEST was wrong", as opposed to a
@@ -112,6 +120,9 @@ export function serviceError(
     detail,
     insufficient,
     !insufficient && CLIENT_ERROR_VARIANTS.test(kind),
+    false,
+    false,
+    body.kind,
   );
 }
 
@@ -518,6 +529,9 @@ class RgbNodeApiWalletHandle implements WalletHandle {
       // to manage the receive it just created needs this. It is non-optional in
       // rgb-lib's ReceiveData; null here only means shape drift.
       batchTransferIdx: safeIntegerOrNull(raw['batch_transfer_idx'], 'receive batch_transfer_idx'),
+      // RGB proxy protocol 1.0 (rgb-lib-bfa): the key a sender encrypts the
+      // consignment to, also embedded in the invoice as `pk`. Absent before.
+      publicKey: stringOrNull(raw['public_key']),
     };
   }
 
@@ -547,6 +561,18 @@ class RgbNodeApiWalletHandle implements WalletHandle {
                 : { amount_sat: request.witnessAmountSat, blinding: null },
             amount: request.amount,
             transport_endpoints: request.transportEndpoints,
+            // Sent only when given: an rgb-node-api older than RGB proxy
+            // protocol 1.0 has no such fields, and `encryption` is not
+            // nullable on the newer one (absent means Required).
+            ...(request.recipientPublicKey !== null
+              ? { public_key: request.recipientPublicKey }
+              : {}),
+            ...(request.recipientExpirationTimestamp !== null
+              ? { expiration_timestamp: request.recipientExpirationTimestamp }
+              : {}),
+            ...(request.recipientEncryption !== null
+              ? { encryption: RGB_LIB_ENCRYPTION[request.recipientEncryption] }
+              : {}),
           },
         ],
       },
