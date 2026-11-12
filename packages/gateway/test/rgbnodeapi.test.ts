@@ -139,7 +139,7 @@ describe('RgbNodeApiWalletBackend requests', () => {
               {
                 recipient_id: 'wvout:recipient',
                 witness_data: { amount_sat: 1_000, blinding: null },
-                amount: 25,
+                assignment: { Fungible: 25 },
                 transport_endpoints: ['rpc://proxy:3000/json-rpc'],
               },
             ],
@@ -177,7 +177,7 @@ describe('RgbNodeApiWalletBackend requests', () => {
       {
         recipient_id: 'sb:wvout:recipient',
         witness_data: { amount_sat: 1_000, blinding: null },
-        amount: 25,
+        assignment: { Fungible: 25 },
         transport_endpoints: ['rpcs://proxy.example/json-rpc'],
         public_key: 'cd'.repeat(32),
         expiration_timestamp: 1_793_723_445,
@@ -234,11 +234,17 @@ describe('RgbNodeApiWalletBackend requests', () => {
     expect(calls.map((call) => [call.url.replace(BASE_URL, '/'), call.body])).toEqual([
       [
         '/wallet/blindreceive',
-        { asset_id: null, amount: null, duration_seconds: 3_600, min_confirmations: 1 },
+        // rgb-lib's serde spelling of Assignment::Any: an amount-less invoice.
+        { asset_id: null, assignment: 'Any', duration_seconds: 3_600, min_confirmations: 1 },
       ],
       [
         '/wallet/witnessreceive',
-        { asset_id: 'rgb:asset', amount: 5, duration_seconds: 3_600, min_confirmations: 1 },
+        {
+          asset_id: 'rgb:asset',
+          assignment: { Fungible: 5 },
+          duration_seconds: 3_600,
+          min_confirmations: 1,
+        },
       ],
     ]);
   });
