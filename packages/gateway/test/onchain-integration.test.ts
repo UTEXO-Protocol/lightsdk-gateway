@@ -209,7 +209,7 @@ describe.runIf(process.env['WALLET_REGTEST'] === '1')('on-chain flows on regtest
           {
             recipient_id: receive.recipientId,
             witness_data: null,
-            amount: 100,
+            assignment: { Fungible: 100 },
             transport_endpoints: [PROXY_URL],
             public_key: receive.publicKey,
             expiration_timestamp: receive.expirationTimestamp,

@@ -224,7 +224,7 @@ export class Counterparty {
             {
               recipient_id: recipient.recipientId,
               witness_data: null,
-              amount,
+              assignment: { Fungible: amount },
               transport_endpoints: [PROXY_URL],
               public_key: recipient.publicKey,
               expiration_timestamp: recipient.expirationTimestamp,

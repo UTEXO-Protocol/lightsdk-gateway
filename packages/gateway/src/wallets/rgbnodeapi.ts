@@ -248,8 +248,10 @@ export function mapAssets(raw: unknown): WalletAsset[] {
         name,
         details: stringOrNull(record['details']),
         precision: safeIntegerOrZero(record['precision'], `asset ${assetId} precision`),
-        // NIA/CFA report `issued_supply`; IFA and BFA name the same genesis
-        // amount `initial_supply`. UDA has neither.
+        // NIA/CFA report `issued_supply`; IFA names the same genesis amount
+        // `initial_supply`. UDA has neither, and neither has BFA since
+        // rgb-lib-bfa bfa.6: its `known_circulating_supply` is not a genesis
+        // amount, so it is deliberately not reported as one.
         issuedSupply: safeIntegerOrNull(
           record['issued_supply'] ?? record['initial_supply'],
           `asset ${assetId} issued_supply`,
@@ -513,7 +515,9 @@ class RgbNodeApiWalletHandle implements WalletHandle {
       request.mode === 'blind' ? 'blindreceive' : 'witnessreceive',
       {
         asset_id: request.assetId,
-        amount: request.amount,
+        // rgb-node-api (rgb-lib-bfa bfa.6+) takes an rgb-lib `Assignment` and
+        // refuses unknown fields, so the old `amount` is never sent.
+        assignment: request.amount === null ? 'Any' : { Fungible: request.amount },
         duration_seconds: request.durationSeconds,
         min_confirmations: request.minConfirmations,
       },
@@ -559,7 +563,7 @@ class RgbNodeApiWalletHandle implements WalletHandle {
               request.witnessAmountSat === null
                 ? null
                 : { amount_sat: request.witnessAmountSat, blinding: null },
-            amount: request.amount,
+            assignment: { Fungible: request.amount },
             transport_endpoints: request.transportEndpoints,
             // Sent only when given: an rgb-node-api older than RGB proxy
             // protocol 1.0 has no such fields, and `encryption` is not
