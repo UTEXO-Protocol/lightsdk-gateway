@@ -17,6 +17,7 @@ import { QueueFullError, UserQueues } from './queue.js';
 import { HttpError } from './errors.js';
 import { createUserRouteSchema, healthRouteSchema, meRouteSchema } from './schemas/index.js';
 import type { WalletBackend } from './wallets/backend.js';
+import type { RawTransactionSource } from './wallets/evidence.js';
 import { RgbNodeApiWalletBackend } from './wallets/rgbnodeapi.js';
 import { WalletOpQueues } from './wallets/queue.js';
 import { WalletPool } from './wallets/pool.js';
@@ -62,6 +63,11 @@ export interface BuildServerOptions {
   loggerLevel?: string;
   /** Wallet backend override (unit tests inject a mock; defaults to rgb-node-api). */
   walletBackend?: WalletBackend;
+  /**
+   * Source of raw transactions for RGB send ownership proofs. Defaults to the
+   * Electrum server in the config; tests inject one or pass null.
+   */
+  transactionSource?: RawTransactionSource | null;
   /** Start the background completions worker. Off in tests. */
   startWorkers?: boolean;
 }
@@ -136,7 +142,18 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   app.decorate('walletPool', walletPool);
   const walletService = new WalletService(db, walletPool, config);
   app.decorate('wallets', walletService);
-  const onchainService = new OnchainService(db, walletPool, walletService, config);
+  const onchainService = new OnchainService(
+    db,
+    walletPool,
+    walletService,
+    config,
+    options.transactionSource,
+    (userId, gaps) =>
+      app.log.warn(
+        { userId, gaps },
+        'RGB send evidence lacks an ownership proof: a verifying client will refuse this send',
+      ),
+  );
   app.decorate('onchain', onchainService);
   const fees = new FeeEstimator({ electrumUrl: config.electrumUrl });
   if (!fees.configured) {

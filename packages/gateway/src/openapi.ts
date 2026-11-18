@@ -320,7 +320,7 @@ const ROUTE_DOCS: Record<string, RouteDoc> = {
     operationId: 'prepareSendAsset',
     summary: 'Prepare an RGB asset send',
     description:
-      "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
+      "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side. `rgbEvidence`, returned when the wallet service supplies it, lets the client verify the RGB transitions the transaction commits to; without it they are opaque to the client. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
     tag: 'On-chain',
     auth: 'bearer',
     idempotent: true,

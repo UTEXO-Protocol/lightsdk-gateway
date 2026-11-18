@@ -113,6 +113,51 @@ export const preparedResponseSchema = {
   additionalProperties: false,
 } as const;
 
+/**
+ * Evidence for verifying an asset send's RGB transitions before signing. Its
+ * key set is exact: the mobile SDKs refuse an `rgbEvidence` object with a
+ * missing or an unknown key.
+ */
+export const rgbEvidenceSchema = {
+  type: 'object',
+  description:
+    "What a client needs to check, before signing, which RGB transitions the transaction commits to. Absent when the wallet service does not return it. Untrusted: a client verifies it against the transaction's own commitment.",
+  properties: {
+    fascia: {
+      type: 'string',
+      description: "rgb-lib's strict-encoded fascia of the transfer, canonical padded base64.",
+    },
+    mpcEntropy: {
+      type: 'string',
+      pattern: '^(0|[1-9][0-9]{0,19})$',
+      description: 'MPC tree entropy, a u64 as decimal text.',
+    },
+    existingOutputProofs: {
+      type: 'array',
+      maxItems: 8,
+      description:
+        'One proof per existing UTXO the transfer assigns state to: the transaction that created it and its derivation index on the colored account.',
+      items: {
+        type: 'object',
+        properties: {
+          transaction: { type: 'string', pattern: '^([0-9a-f]{2})+$' },
+          vout: { type: 'integer', minimum: 0 },
+          derivationIndex: { type: 'integer', minimum: 0 },
+        },
+        required: ['transaction', 'vout', 'derivationIndex'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['fascia', 'mpcEntropy', 'existingOutputProofs'],
+  additionalProperties: false,
+} as const;
+
+export const assetPreparedResponseSchema = {
+  ...preparedResponseSchema,
+  properties: { ...preparedResponseSchema.properties, rgbEvidence: rgbEvidenceSchema },
+} as const;
+
 export const completeBodySchema = {
   type: 'object',
   properties: {
@@ -333,7 +378,7 @@ export const sendAssetPrepareRouteSchema = {
     required: ['assetId', 'amount', 'recipientId'],
     additionalProperties: false,
   },
-  response: { 201: preparedResponseSchema, ...prepareErrorResponses },
+  response: { 201: assetPreparedResponseSchema, ...prepareErrorResponses },
 } as const;
 
 export const sendAssetCompleteRouteSchema = {

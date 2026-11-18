@@ -167,6 +167,49 @@ export interface SendAssetBeginRequest {
   expirationTimestamp: number;
 }
 
+/**
+ * What a client needs to verify, before signing, which RGB transitions an
+ * asset-send transaction commits to. The device checks all of it against the
+ * transaction's own commitment, so none of it is trusted.
+ */
+export interface RgbSendEvidence {
+  /** rgb-lib's strict-encoded fascia of the transfer, canonical padded base64. */
+  fascia: string;
+  /** MPC tree entropy as decimal text: a u64 exceeds JSON's safe integers. */
+  mpcEntropy: string;
+  /** Ownership proofs for existing UTXOs the transfer assigns state to. */
+  existingOutputProofs: RgbExistingOutputProof[];
+}
+
+export interface RgbExistingOutputProof {
+  /** The transaction that created the output, lowercase hex. */
+  transaction: string;
+  vout: number;
+  /** Index on the colored account's branch 0. */
+  derivationIndex: number;
+}
+
+/** A UTXO a prepared asset send assigns its RGB change to. */
+export interface AssetSendChangeUtxo {
+  txid: string;
+  vout: number;
+  /**
+   * Index on the colored account, for a UTXO the wallet already holds. Null
+   * for an output of the prepared transaction itself.
+   */
+  derivationIndex: number | null;
+}
+
+export interface AssetSendPreparation {
+  psbt: string;
+  /**
+   * Null when the wallet service returns no evidence (an older rgb-node-api).
+   * Its `existingOutputProofs` are empty here: they are built from `changeUtxos`.
+   */
+  rgbEvidence: RgbSendEvidence | null;
+  changeUtxos: AssetSendChangeUtxo[];
+}
+
 export interface AssetSendResult {
   txid: string;
   /** rgb-lib's batch transfer index for the created transfer. */
@@ -198,7 +241,7 @@ export interface WalletHandle {
   /** Broadcast a signed BTC-send PSBT; returns the txid. */
   sendBtcEnd(signedPsbt: string): Promise<string>;
   /** Prepare an unsigned asset-send PSBT (opret commitment already embedded). */
-  sendAssetBegin(request: SendAssetBeginRequest): Promise<string>;
+  sendAssetBegin(request: SendAssetBeginRequest): Promise<AssetSendPreparation>;
   /**
    * Post consignment + broadcast a signed asset-send PSBT.
    *

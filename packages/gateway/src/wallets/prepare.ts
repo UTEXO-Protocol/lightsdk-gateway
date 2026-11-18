@@ -19,9 +19,15 @@ import {
   WalletBackendError,
   walletHttpError,
   type RecipientEncryption,
+  type RgbSendEvidence,
   type WalletHandle,
   type WalletIdentity,
 } from './backend.js';
+import {
+  existingOutputProofs,
+  transactionSourceFor,
+  type RawTransactionSource,
+} from './evidence.js';
 import type { WalletPool } from './pool.js';
 import type { WalletService } from './service.js';
 
@@ -66,6 +72,11 @@ export interface PreparedOp {
   intent: OnchainIntent;
   /** Unix milliseconds; completion after this fails with 410 OP_EXPIRED. */
   expiresAt: number;
+  /**
+   * Asset sends only, and only when the wallet service supplies it: what the
+   * device needs to verify the send's RGB transitions before signing.
+   */
+  rgbEvidence?: RgbSendEvidence;
 }
 
 export interface CompletedOp {
@@ -244,6 +255,12 @@ export class OnchainService {
     private readonly pool: WalletPool,
     private readonly wallets: WalletService,
     private readonly config: GatewayConfig,
+    /** Where the creating transactions of existing change UTXOs are read from. */
+    private readonly transactions: RawTransactionSource | null = transactionSourceFor(
+      config.electrumUrl,
+    ),
+    /** Told when a send needs an ownership proof the gateway could not build. */
+    private readonly onEvidenceGap: (userId: string, gaps: string[]) => void = () => {},
   ) {}
 
   private async run<T>(
@@ -330,7 +347,7 @@ export class OnchainService {
     const recipientExpirationTimestamp = params.recipientExpirationTimestamp ?? null;
     const recipientEncryption = params.recipientEncryption ?? null;
     const expiresAtSeconds = Math.floor((now + this.config.onchainOpTtlSeconds * 1000) / 1000);
-    const psbt = await this.run(identity, (wallet) =>
+    const { psbt, rgbEvidence, changeUtxos } = await this.run(identity, (wallet) =>
       wallet.sendAssetBegin({
         assetId: params.assetId,
         recipientId: params.recipientId,
@@ -363,7 +380,17 @@ export class OnchainService {
       },
       utxos: null,
     };
-    return this.storePrepared(userId, 'send_asset', psbt, intent, now);
+    const prepared = this.storePrepared(userId, 'send_asset', psbt, intent, now);
+    if (rgbEvidence === null) return prepared;
+    const { proofs, gaps } = await existingOutputProofs(
+      changeUtxos,
+      txidFromPsbt(psbt),
+      this.transactions,
+    );
+    if (gaps.length > 0) this.onEvidenceGap(userId, gaps);
+    // Not stored with the op: completion never needs it, and a replayed prepare
+    // is answered from the idempotency cache, which holds the whole response.
+    return { ...prepared, rgbEvidence: { ...rgbEvidence, existingOutputProofs: proofs } };
   }
 
   async prepareCreateUtxos(
