@@ -47,6 +47,8 @@ export {
   type CreateUtxosParams,
   type ReceiveData,
   type ReceiveRequest,
+  type RgbExistingOutputProof,
+  type RgbSendEvidence,
   type SendAssetBeginRequest,
   type UserXpubs,
   type WalletAsset,

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { loadConfig, type GatewayConfig } from '../src/config.js';
 import { buildServer } from '../src/server.js';
 import type { WalletBackend } from '../src/wallets/backend.js';
+import type { RawTransactionSource } from '../src/wallets/evidence.js';
 
 export const OPERATOR_TOKEN = 'test-operator-token-0123456789';
 
@@ -24,6 +25,7 @@ export interface TestServerOptions {
   configOverrides?: Partial<GatewayConfig>;
   loggerStream?: { write(msg: string): void };
   walletBackend?: WalletBackend;
+  transactionSource?: RawTransactionSource | null;
 }
 
 export async function testServer(options: TestServerOptions = {}): Promise<FastifyInstance> {
@@ -32,6 +34,9 @@ export async function testServer(options: TestServerOptions = {}): Promise<Fasti
     config,
     ...(options.loggerStream !== undefined ? { loggerStream: options.loggerStream } : {}),
     ...(options.walletBackend !== undefined ? { walletBackend: options.walletBackend } : {}),
+    ...(options.transactionSource !== undefined
+      ? { transactionSource: options.transactionSource }
+      : {}),
   });
 }
 

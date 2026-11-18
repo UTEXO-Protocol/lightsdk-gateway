@@ -42,9 +42,23 @@ describe('on-chain prepare/complete routes', () => {
   let backend: MockWalletBackend;
   let user: TestUser;
 
+  /** What the fake indexer serves for ownership proofs, by txid. */
+  const rawTransactions = new Map<string, string>();
+
   beforeEach(async () => {
     backend = new MockWalletBackend();
-    app = await testServer({ walletBackend: backend });
+    rawTransactions.clear();
+    app = await testServer({
+      walletBackend: backend,
+      transactionSource: {
+        rawTransaction: (txid) => {
+          const transaction = rawTransactions.get(txid);
+          return transaction === undefined
+            ? Promise.reject(new Error('unknown transaction'))
+            : Promise.resolve(transaction);
+        },
+      },
+    });
     user = await createTestUser(app);
     const registered = await app.inject({
       method: 'POST',
@@ -462,6 +476,51 @@ describe('on-chain prepare/complete routes', () => {
       });
       // The wallet-side pending transfer expires together with the op.
       expect(request!.expirationTimestamp).toBe(Math.floor(body.expiresAt / 1000));
+    });
+
+    it('omits rgbEvidence when the wallet service returns none', async () => {
+      // As for an rgb-node-api that predates the send evidence.
+      expect('rgbEvidence' in (await prepareSendAsset()).json()).toBe(false);
+    });
+
+    it('returns the wallet service’s RGB send evidence, also on a replayed prepare', async () => {
+      const rgbEvidence = {
+        fascia: 'ZmFzY2lh',
+        mpcEntropy: '18446744073709551615',
+        existingOutputProofs: [{ transaction: '02000000', vout: 2, derivationIndex: 7 }],
+      };
+      // The RGB change is on an existing UTXO and, for another asset, on an
+      // output of the prepared transaction: only the first needs a proof.
+      const existing = 'ab'.repeat(32);
+      rawTransactions.set(existing, '02000000');
+      backend.dataFor = () => ({
+        preparedPsbt: PARSABLE_PSBT_A,
+        rgbEvidence: { ...rgbEvidence, existingOutputProofs: [] },
+        changeUtxos: [
+          { txid: existing, vout: 2, derivationIndex: 7 },
+          { txid: txidFromPsbt(PARSABLE_PSBT_A)!, vout: 1, derivationIndex: null },
+        ],
+      });
+      app.walletPool.evict(user.userId); // reopen so the fixture evidence applies
+      const key = 'evidence-key';
+      const first = await app.inject({
+        method: 'POST',
+        url: '/v1/onchain/send-asset/prepare',
+        headers: headers({ key }),
+        payload: { assetId: ASSET_ID, amount: 25, recipientId: 'utxob:fixture-recipient' },
+      });
+      expect(first.statusCode).toBe(201);
+      // Exactly these keys: the mobile SDKs refuse any other shape.
+      expect(first.json().rgbEvidence).toEqual(rgbEvidence);
+      // A replayed prepare must carry the same evidence: a device that lost the
+      // first response cannot verify, and so cannot sign, without it.
+      const replay = await app.inject({
+        method: 'POST',
+        url: '/v1/onchain/send-asset/prepare',
+        headers: headers({ key }),
+        payload: { assetId: ASSET_ID, amount: 25, recipientId: 'utxob:fixture-recipient' },
+      });
+      expect(replay.json()).toEqual(first.json());
     });
 
     it('passes through witness data and pinned allowlisted transport endpoints', async () => {

@@ -2099,7 +2099,7 @@
       "post": {
         "operationId": "prepareSendAsset",
         "summary": "Prepare an RGB asset send",
-        "description": "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side; the RGB transition itself is opaque to it. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
+        "description": "Builds an unsigned PSBT that sends `amount` of `assetId` to the invoice's `recipientId`, with the RGB commitment already embedded. `intent` lets the client check the bitcoin side. `rgbEvidence`, returned when the wallet service supplies it, lets the client verify the RGB transitions the transaction commits to; without it they are opaque to the client. On an RGB proxy protocol 1.0 wallet service, pass the invoice's `pk`, `expiry` and (when present) `enc` as `recipientPublicKey`, `recipientExpirationTimestamp` and `recipientEncryption`.",
         "tags": [
           "On-chain"
         ],
@@ -2209,7 +2209,81 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PreparedOperation"
+                  "type": "object",
+                  "properties": {
+                    "opId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f-]{36}$",
+                      "description": "Operation id (a UUID) returned by prepare."
+                    },
+                    "psbt": {
+                      "type": "string",
+                      "description": "Unsigned PSBT, base64. Check it against `intent`."
+                    },
+                    "intent": {
+                      "$ref": "#/components/schemas/OnchainIntent"
+                    },
+                    "expiresAt": {
+                      "type": "integer",
+                      "description": "Unix milliseconds. Completing after this fails with 410 `OP_EXPIRED`."
+                    },
+                    "rgbEvidence": {
+                      "type": "object",
+                      "description": "What a client needs to check, before signing, which RGB transitions the transaction commits to. Absent when the wallet service does not return it. Untrusted: a client verifies it against the transaction's own commitment.",
+                      "properties": {
+                        "fascia": {
+                          "type": "string",
+                          "description": "rgb-lib's strict-encoded fascia of the transfer, canonical padded base64."
+                        },
+                        "mpcEntropy": {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]{0,19})$",
+                          "description": "MPC tree entropy, a u64 as decimal text."
+                        },
+                        "existingOutputProofs": {
+                          "type": "array",
+                          "maxItems": 8,
+                          "description": "One proof per existing UTXO the transfer assigns state to: the transaction that created it and its derivation index on the colored account.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "transaction": {
+                                "type": "string",
+                                "pattern": "^([0-9a-f]{2})+$"
+                              },
+                              "vout": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "derivationIndex": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "transaction",
+                              "vout",
+                              "derivationIndex"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "fascia",
+                        "mpcEntropy",
+                        "existingOutputProofs"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "opId",
+                    "psbt",
+                    "intent",
+                    "expiresAt"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }

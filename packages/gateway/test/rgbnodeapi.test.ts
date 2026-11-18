@@ -118,7 +118,8 @@ describe('RgbNodeApiWalletBackend requests', () => {
         minConfirmations: 1,
         expirationTimestamp: 1_700_000_600,
       }),
-    ).toBe('psbt-asset');
+      // An rgb-node-api that predates the send evidence returns only the PSBT.
+    ).toEqual({ psbt: 'psbt-asset', rgbEvidence: null, changeUtxos: [] });
     expect(await handle.sendAssetEnd('signed-asset')).toEqual({
       txid: 'txid-asset',
       batchTransferIdx: 4,
@@ -154,6 +155,76 @@ describe('RgbNodeApiWalletBackend requests', () => {
       ['/wallet/createutxosbegin', { up_to: true, num: 3, size: 1_000, fee_rate: 2 }],
       ['/wallet/createutxosend', { signed_psbt: 'signed-utxos' }],
     ]);
+  });
+
+  it('returns the send evidence of sendbegin and refuses a malformed one', async () => {
+    const request = {
+      assetId: 'rgb:asset',
+      recipientId: 'wvout:recipient',
+      amount: 25,
+      witnessAmountSat: 1_000,
+      transportEndpoints: ['rpc://proxy:3000/json-rpc'],
+      recipientPublicKey: null,
+      recipientExpirationTimestamp: null,
+      recipientEncryption: null,
+      donation: false,
+      feeRateSatPerVb: 3,
+      minConfirmations: 1,
+      expirationTimestamp: 1_700_000_600,
+    };
+    const existing = 'ab'.repeat(32);
+    const prepared = 'cd'.repeat(32);
+    const { handle } = await handleFor(
+      ok({
+        psbt: 'psbt-asset',
+        fascia: '666173636961',
+        entropy: '18446744073709551615',
+        change_utxos: [
+          { txid: existing, vout: 2, derivation_index: 7 },
+          { txid: prepared, vout: 1, derivation_index: null },
+        ],
+      }),
+    );
+    // Hex from rgb-node-api becomes the canonical base64 the mobile SDKs read,
+    // and the u64 entropy stays text so it is never rounded.
+    expect(await handle.sendAssetBegin(request)).toEqual({
+      psbt: 'psbt-asset',
+      rgbEvidence: {
+        fascia: 'ZmFzY2lh',
+        mpcEntropy: '18446744073709551615',
+        existingOutputProofs: [],
+      },
+      changeUtxos: [
+        { txid: existing, vout: 2, derivationIndex: 7 },
+        { txid: prepared, vout: 1, derivationIndex: null },
+      ],
+    });
+    for (const drifted of [
+      'nope',
+      [{ txid: 'ab', vout: 0 }],
+      [{ txid: existing, vout: -1 }],
+      [{ txid: existing, vout: 0, derivation_index: 1.5 }],
+    ]) {
+      const drift = await handleFor(ok({ psbt: 'psbt-asset', change_utxos: drifted }));
+      await expect(drift.handle.sendAssetBegin(request)).rejects.toMatchObject({
+        detail: 'unexpected sendAssetBegin change_utxos shape',
+      });
+    }
+    for (const drifted of [
+      { fascia: '666173636961' },
+      { entropy: '7' },
+      { fascia: '666173636961', entropy: 7 },
+      { fascia: '666173636961', entropy: '18446744073709551616' },
+      { fascia: '666173636961', entropy: '007' },
+      { fascia: '66617363696', entropy: '7' },
+      { fascia: '6661736369ZZ', entropy: '7' },
+      { fascia: '', entropy: '7' },
+    ]) {
+      const drift = await handleFor(ok({ psbt: 'psbt-asset', ...drifted }));
+      await expect(drift.handle.sendAssetBegin(request)).rejects.toMatchObject({
+        detail: 'unexpected sendAssetBegin evidence shape',
+      });
+    }
   });
 
   it('passes the recipient key, expiry and encryption of a proxy protocol 1.0 send', async () => {

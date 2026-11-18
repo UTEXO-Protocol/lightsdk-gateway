@@ -19,12 +19,15 @@
  */
 import {
   WalletBackendError,
+  type AssetSendChangeUtxo,
+  type AssetSendPreparation,
   type AssetSendResult,
   type Balance,
   type CreateUtxosParams,
   type ReceiveData,
   type ReceiveRequest,
   type RecipientEncryption,
+  type RgbSendEvidence,
   type SendAssetBeginRequest,
   type UnspentAllocation,
   type UserXpubs,
@@ -179,6 +182,62 @@ function requiredString(raw: Record<string, unknown>, field: string, operation: 
     );
   }
   return value;
+}
+
+const CANONICAL_U64 = /^(0|[1-9][0-9]{0,19})$/;
+const LOWERCASE_HEX = /^([0-9a-f]{2})+$/;
+
+/**
+ * The evidence `sendbegin` returns next to the PSBT: the fascia as hex and the
+ * MPC entropy as decimal text. An rgb-node-api that predates it returns
+ * neither, which is reported as no evidence. One without the other, or a
+ * malformed value, is shape drift: passing half an evidence on would only make
+ * the device refuse the send for a reason nobody can read.
+ */
+function rgbSendEvidence(raw: Record<string, unknown>): RgbSendEvidence | null {
+  const fascia = raw['fascia'];
+  const entropy = raw['entropy'];
+  if (fascia === undefined && entropy === undefined) return null;
+  if (
+    typeof fascia !== 'string' ||
+    typeof entropy !== 'string' ||
+    !LOWERCASE_HEX.test(fascia) ||
+    !CANONICAL_U64.test(entropy) ||
+    BigInt(entropy) > 0xffff_ffff_ffff_ffffn
+  ) {
+    throw new WalletBackendError(
+      'wallet sendAssetBegin failed',
+      'unexpected sendAssetBegin evidence shape',
+    );
+  }
+  return {
+    fascia: Buffer.from(fascia, 'hex').toString('base64'),
+    mpcEntropy: entropy,
+    existingOutputProofs: [],
+  };
+}
+
+const TXID = /^[0-9a-f]{64}$/;
+
+/** `change_utxos` of `sendbegin`; absent on an rgb-node-api that predates it. */
+function sendChangeUtxos(value: unknown): AssetSendChangeUtxo[] {
+  if (value === undefined || value === null) return [];
+  const drift = (): never => {
+    throw new WalletBackendError(
+      'wallet sendAssetBegin failed',
+      'unexpected sendAssetBegin change_utxos shape',
+    );
+  };
+  if (!Array.isArray(value)) return drift();
+  return value.map((entry) => {
+    const utxo = asRecord(entry);
+    const { txid, vout, derivation_index: index } = utxo;
+    const isIndex = (n: unknown): n is number =>
+      typeof n === 'number' && Number.isInteger(n) && n >= 0;
+    if (typeof txid !== 'string' || !TXID.test(txid) || !isIndex(vout)) return drift();
+    if (index !== undefined && index !== null && !isIndex(index)) return drift();
+    return { txid, vout, derivationIndex: index ?? null };
+  });
 }
 
 function mapBalance(value: unknown, field: string): Balance {
@@ -553,7 +612,7 @@ class RgbNodeApiWalletHandle implements WalletHandle {
     return requiredString(raw, 'txid', 'sendBtcEnd');
   }
 
-  async sendAssetBegin(request: SendAssetBeginRequest): Promise<string> {
+  async sendAssetBegin(request: SendAssetBeginRequest): Promise<AssetSendPreparation> {
     const raw = await this.call('sendAssetBegin', 'sendbegin', {
       recipient_map: {
         [request.assetId]: [
@@ -585,7 +644,11 @@ class RgbNodeApiWalletHandle implements WalletHandle {
       min_confirmations: request.minConfirmations,
       expiration_timestamp: request.expirationTimestamp,
     });
-    return requiredString(raw, 'psbt', 'sendAssetBegin');
+    return {
+      psbt: requiredString(raw, 'psbt', 'sendAssetBegin'),
+      rgbEvidence: rgbSendEvidence(raw),
+      changeUtxos: sendChangeUtxos(raw['change_utxos']),
+    };
   }
 
   async sendAssetEnd(signedPsbt: string): Promise<AssetSendResult> {
